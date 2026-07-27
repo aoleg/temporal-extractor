@@ -8,10 +8,11 @@ how the pipeline is meant to be debugged -- each stage runnable on its own.
 """
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
+
+import cv2
 
 from . import config as cfg
 from .frames import content_box, crop, read_png_rgb, write_png_rgb
@@ -29,8 +30,16 @@ from .select import (
     DEFAULT_MIN_GAP_S,
     DEFAULT_WINDOW,
     hamming,
+    read_selection,
     select_frames,
     write_selection,
+)
+from .sheet import (
+    build_contact_sheet,
+    build_manifest,
+    collect_stills,
+    write_manifest,
+    write_sheet,
 )
 
 
@@ -138,6 +147,55 @@ def cmd_select(args) -> int:
     return 0
 
 
+def cmd_sheet(args) -> int:
+    stills_dir = Path(args.stills_dir)
+    if not stills_dir.is_dir():
+        raise SystemExit(f"not a directory: {stills_dir}")
+
+    selection = read_selection(args.selection) if args.selection else None
+    entries = collect_stills(stills_dir, selection)
+    if not entries:
+        raise SystemExit(f"no PNG stills in {stills_dir}")
+
+    unmatched = [e["file"] for e in entries if "frame" not in e]
+    if unmatched:
+        print(f"warning: {len(unmatched)} still(s) do not follow the "
+              f"<name>_s<scene>_f<frame>[_seed<n>].png convention, so they carry no "
+              f"provenance: {unmatched[:3]}{' ...' if len(unmatched) > 3 else ''}")
+    if selection:
+        missing = [e["file"] for e in entries if "frame" in e and "source_frames" not in e]
+        if missing:
+            print(f"warning: {len(missing)} still(s) name a frame absent from the selection; "
+                  "is this the right selection JSON?")
+
+    for entry in entries:
+        img = cv2.imread(entry["path"], cv2.IMREAD_COLOR)
+        if img is not None:
+            entry["height"], entry["width"] = img.shape[:2]
+
+    title = args.title
+    if title is None:
+        name = (selection or {}).get("video", {}).get("filename", stills_dir.name)
+        title = f"{name}   {len(entries)} stills"
+
+    sheet_path = Path(args.out) if args.out else stills_dir.parent / f"{stills_dir.name}_sheet.jpg"
+    manifest_path = (Path(args.manifest) if args.manifest
+                     else stills_dir.parent / f"{stills_dir.name}_manifest.json")
+
+    sheet = build_contact_sheet(entries, columns=args.columns,
+                                thumb_width=args.thumb_width, title=title)
+    write_sheet(sheet, sheet_path, quality=args.quality)
+    manifest = build_manifest(entries, selection=selection,
+                              contact_sheet=sheet_path.name)
+    write_manifest(manifest, manifest_path)
+
+    with_prov = sum(1 for e in entries if "source_frames" in e)
+    print(f"{len(entries)} stills, {with_prov} with source-frame provenance")
+    print(f"contact sheet {sheet.shape[1]}x{sheet.shape[0]} -> {sheet_path}")
+    print(f"manifest -> {manifest_path}")
+    return 0
+
+
 def cmd_restore(args) -> int:
     png_dir = Path(args.png_dir)
     paths, frames = _load_window(png_dir, args.window)
@@ -221,6 +279,19 @@ def build_parser() -> argparse.ArgumentParser:
     sel.add_argument("--max_per_scene", type=int, default=None,
                      help="cap picks from any one scene, so a long take cannot dominate")
     sel.set_defaults(func=cmd_select)
+
+    sh = sub.add_parser("sheet", help="stage 4: contact sheet + manifest from a folder of stills")
+    sh.add_argument("stills_dir", help="folder of restored stills")
+    sh.add_argument("--selection", default=None,
+                    help="selection JSON from stage 2; without it the sheet has no "
+                         "timestamps, scenes or source-frame provenance")
+    sh.add_argument("--out", default=None, help="contact sheet JPEG (default: <dir>_sheet.jpg)")
+    sh.add_argument("--manifest", default=None, help="manifest JSON (default: <dir>_manifest.json)")
+    sh.add_argument("--columns", type=int, default=5, help="grid columns (default 5)")
+    sh.add_argument("--thumb_width", type=int, default=420, help="cell width in px (default 420)")
+    sh.add_argument("--quality", type=int, default=92, help="JPEG quality (default 92)")
+    sh.add_argument("--title", default=None, help="sheet title (default: video name + count)")
+    sh.set_defaults(func=cmd_sheet)
 
     r = sub.add_parser("restore", help="stage 3: restore a window, keep the centre frame")
     r.add_argument("png_dir", help="folder of PNGs forming one window")

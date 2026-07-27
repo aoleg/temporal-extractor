@@ -24,9 +24,21 @@ Only `restore/worker.py` imports torch.
 1. **scan** — decode, score every frame, detect scene boundaries, write metadata. CPU only. **built**
 2. **select** — pick the best N frames, deduped and spread across scenes. **built**
 3. **restore** — decode `[i-k .. i+k]`, run SeedVR2 on the whole window, keep the centre. **built**
-4. **sheet** — contact sheet + manifest. *(not built yet)*
+4. **sheet** — contact sheet + manifest. **built**
 
-Each stage is runnable on its own from the CLI.
+Each stage is runnable on its own from the CLI. They are not yet chained; a
+`run` command is the remaining piece.
+
+## Still filename convention
+
+```
+<video_stem>_s<scene:03d>_f<frame:06d>[_seed<n>].png
+```
+
+Defined once in `sheet.still_name()` and parsed back by `sheet.parse_still_name()`.
+Stage 4 recovers scene, source frame and seed from the name, so a folder of
+stills is self-describing even without the selection JSON — though with it, the
+sheet and manifest also carry timestamps and full source-frame provenance.
 
 ## Stage 1: scan
 
@@ -165,6 +177,34 @@ Two things worth knowing before sweeping it:
   that speckle** — ranking a sweep by sharpness will pick the worst image.
 
 Any `cfg_scale != 1.0` runs both DiT branches and roughly doubles phase 2.
+
+## Stage 4: sheet
+
+```
+..\.venv\Scripts\python.exe -m temporal_extractor.cli sheet <stills_dir> --selection <select.json>
+```
+
+Writes a contact sheet JPEG and a manifest JSON.
+
+The **contact sheet** is for manual review, so every cell is labelled with what
+you need to act on it: source frame, timestamp, scene, seed, the window it came
+from, and output dimensions. Cells are ordered by source frame, and sized from
+the median aspect so one odd-shaped still cannot stretch the grid.
+
+The **manifest** records, per still, the exact source frames that produced it —
+the one fact you cannot recover by looking at the PNG later — plus the video,
+content box, selection parameters and scene table.
+
+Both degrade gracefully. Without `--selection` you still get a sheet, minus
+timestamps and provenance; stills whose names do not match the convention are
+laid out but flagged as carrying no provenance.
+
+It is worth actually looking at the sheet rather than trusting the selection
+metrics. On the first 15-still run it immediately showed that picks #09 (f880)
+and #10 (f906) are the same photograph: they sit at dHash distance exactly 16 and
+exactly 1.04s apart, clearing both stage-2 floors by a hair. Tightening either
+floor relocates the pair rather than fixing it, because two adjacent segments of
+a long take keep choosing frames either side of their shared boundary.
 
 ## Memory
 
