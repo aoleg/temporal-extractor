@@ -21,6 +21,22 @@ def write_png_rgb(path, rgb: np.ndarray) -> None:
     cv2.imwrite(str(path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
 
 
+def content_box_from_projection(projection: np.ndarray, thresh: int = 16):
+    """
+    Content box of an HxW brightness projection. Returns (x, y, w, h).
+
+    The projection is the brightest value each pixel reaches across whatever
+    frames were considered; anything that never exceeds `thresh` is matte.
+    """
+    cols = np.where(projection.max(axis=0) > thresh)[0]
+    rows = np.where(projection.max(axis=1) > thresh)[0]
+    if len(cols) == 0 or len(rows) == 0:
+        return 0, 0, projection.shape[1], projection.shape[0]
+    x0, x1 = int(cols[0]), int(cols[-1]) + 1
+    y0, y1 = int(rows[0]), int(rows[-1]) + 1
+    return x0, y0, x1 - x0, y1 - y0
+
+
 def content_box(frames, thresh: int = 16):
     """
     Find the non-black content box shared by every frame in a window.
@@ -34,14 +50,7 @@ def content_box(frames, thresh: int = 16):
     1440p, cropping them was the difference between running and a hard OOM.
     """
     stack = frames if isinstance(frames, np.ndarray) else np.stack(frames)
-    acc = stack.max(axis=0).max(axis=2)          # brightest value each pixel reaches
-    cols = np.where(acc.max(axis=0) > thresh)[0]
-    rows = np.where(acc.max(axis=1) > thresh)[0]
-    if len(cols) == 0 or len(rows) == 0:
-        return 0, 0, stack.shape[2], stack.shape[1]
-    x0, x1 = int(cols[0]), int(cols[-1]) + 1
-    y0, y1 = int(rows[0]), int(rows[-1]) + 1
-    return x0, y0, x1 - x0, y1 - y0
+    return content_box_from_projection(stack.max(axis=0).max(axis=2), thresh)
 
 
 def crop(frames, box):

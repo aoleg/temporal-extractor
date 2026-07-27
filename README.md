@@ -21,14 +21,58 @@ Only `restore/worker.py` imports torch.
 
 ## Stages
 
-1. **scan** — decode, score every frame, detect scene boundaries, write metadata. CPU only. *(not built yet)*
+1. **scan** — decode, score every frame, detect scene boundaries, write metadata. CPU only. **built**
 2. **select** — pick the best N frames, deduped and spread across scenes. *(not built yet)*
 3. **restore** — decode `[i-k .. i+k]`, run SeedVR2 on the whole window, keep the centre. **built**
 4. **sheet** — contact sheet + manifest. *(not built yet)*
 
 Each stage is runnable on its own from the CLI.
 
-## Usage
+## Stage 1: scan
+
+```
+..\.venv\Scripts\python.exe -m temporal_extractor.cli scan <video> [--out <json>]
+```
+
+One decode pass produces everything downstream needs, so nothing re-decodes the
+video until stage 3 wants real pixels. Per frame it records index, timestamp,
+variance-of-Laplacian sharpness, scene-change delta, dHash and scene id; per
+scene, the bounds and the sharpest member.
+
+**Scene detection** is the mean absolute difference of the HSV channels between
+consecutive frames — the same idea as PySceneDetect's `ContentDetector`, and
+`--scene_threshold` is on the same scale (default 27.0) — computed inline on
+frames we are already decoding rather than pulling in `scenedetect` and a second
+decode pass. Hue is compared circularly so a red-to-red transition does not read
+as a cut. On the sample footage the metric is sharply bimodal (real cuts at
+46–69, everything else below 9), so any threshold from 10 to 45 gives the same
+answer; 27.0 sits in the middle of that gap. Two encodes of the same film at
+480p and 1080p yield identical scene boundaries.
+
+**Content box** detection is on by default, taking the union of non-matte area
+over 60 frames spread through the video — one frame is not enough, because fades
+and dark shots under-report it. Sharpness is then measured on picture only. This
+is not merely a compute saving: measured against a full-frame scan, rank
+correlation is 0.981, and the sharpest frame of one scene out of four changed.
+The bars carry per-frame compression noise, so they are not a constant offset.
+
+**dHash** is what gives stage 2 diversity, and scene id alone would not be
+enough: within a single 35-second take, two frames 9 seconds apart scored a
+Hamming distance of 41, further apart than two frames from *different* scenes
+(27). Adjacent frames score 0, so slow pans dedupe cleanly.
+
+Scan cost is decode-bound: ~6s for 1517 frames at 848×480, ~25s for 1536 frames
+at 1920×1080.
+
+### A warning about the sharpness numbers
+
+Variance of Laplacian is **not** scale-invariant and **rises with invented
+noise**. The same film scored a peak of 470 at 480p and 53 at 1080p. Use it to
+rank frames within one video at one resolution; never threshold on an absolute
+value, and never rank a generation sweep by it — at `cfg_scale` 3.0 it reports
+the *noisiest* output as the sharpest.
+
+## Stage 3: restore
 
 ```
 ..\.venv\Scripts\python.exe -m temporal_extractor.cli restore <png_dir> [options]

@@ -16,6 +16,12 @@ from pathlib import Path
 from . import config as cfg
 from .frames import content_box, crop, read_png_rgb, write_png_rgb
 from .restore import SeedVR2Restorer
+from .scan import (
+    DEFAULT_MIN_SCENE_LEN,
+    DEFAULT_SCENE_THRESHOLD,
+    scan_video,
+    write_scan,
+)
 
 
 def _load_window(png_dir: Path, window: int):
@@ -27,6 +33,51 @@ def _load_window(png_dir: Path, window: int):
         k = (len(paths) - window) // 2
         paths = paths[k:k + window]
     return paths, [read_png_rgb(p) for p in paths]
+
+
+def cmd_scan(args) -> int:
+    video = Path(args.video)
+    if not video.exists():
+        raise SystemExit(f"no such video: {video}")
+
+    def progress(done, total):
+        pct = f" ({100 * done / total:.0f}%)" if total > 0 else ""
+        print(f"\r  scanned {done} frames{pct}", end="", flush=True)
+
+    meta = scan_video(
+        video,
+        scene_threshold=args.scene_threshold,
+        min_scene_len=args.min_scene_len,
+        detect_content_box=not args.no_content_box,
+        progress=None if args.quiet else progress,
+    )
+    if not args.quiet:
+        print()
+
+    out = Path(args.out) if args.out else video.with_suffix(".scan.json")
+    write_scan(meta, out)
+
+    v, box, scenes = meta["video"], meta["content_box"], meta["scenes"]
+    print(f"{v['filename']}: {v['width']}x{v['height']} @ {v['fps']:.3f}fps, "
+          f"{v['frame_count']} frames, {v['duration_s']:.1f}s")
+    if (box["w"], box["h"]) != (v["width"], v["height"]):
+        print(f"content box: {box['w']}x{box['h']} at ({box['x']},{box['y']}) "
+              f"-- {100 * (1 - box['w'] * box['h'] / (v['width'] * v['height'])):.0f}% of the frame is matte")
+    else:
+        print("content box: full frame (no pillar/letterboxing)")
+    print(f"scenes: {len(scenes)} (threshold {meta['scan']['scene_threshold']}, "
+          f"min length {meta['scan']['min_scene_len']} frames)")
+
+    for scene in scenes[:args.show_scenes]:
+        print(f"  scene {scene['id']:>3}  frames {scene['start']:>6}-{scene['end']:<6} "
+              f"{scene['start_t']:>8.2f}s-{scene['end_t']:<8.2f}s  "
+              f"n={scene['frame_count']:<5} best={scene['best_frame']:<6} "
+              f"sharp={scene['best_sharpness']:.1f} (mean {scene['mean_sharpness']:.1f})")
+    if len(scenes) > args.show_scenes:
+        print(f"  ... {len(scenes) - args.show_scenes} more")
+
+    print(f"scanned in {meta['scan']['elapsed_s']:.1f}s -> {out}")
+    return 0
 
 
 def cmd_restore(args) -> int:
@@ -80,6 +131,20 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="temporal_extractor",
                                  description="Extract high-quality stills from low-quality video.")
     sub = ap.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("scan", help="stage 1: score every frame, find scenes, write metadata JSON")
+    s.add_argument("video", help="input video file")
+    s.add_argument("--out", default=None, help="metadata JSON path (default: <video>.scan.json)")
+    s.add_argument("--scene_threshold", type=float, default=DEFAULT_SCENE_THRESHOLD,
+                   help=f"HSV content delta that counts as a cut (default {DEFAULT_SCENE_THRESHOLD}; "
+                        "same scale as PySceneDetect ContentDetector). Lower = more scenes")
+    s.add_argument("--min_scene_len", type=int, default=DEFAULT_MIN_SCENE_LEN,
+                   help=f"discard cuts producing a scene shorter than N frames (default {DEFAULT_MIN_SCENE_LEN})")
+    s.add_argument("--no_content_box", action="store_true",
+                   help="skip pillar/letterbox detection and score the full frame")
+    s.add_argument("--show_scenes", type=int, default=20, help="how many scenes to print")
+    s.add_argument("--quiet", action="store_true")
+    s.set_defaults(func=cmd_scan)
 
     r = sub.add_parser("restore", help="stage 3: restore a window, keep the centre frame")
     r.add_argument("png_dir", help="folder of PNGs forming one window")
