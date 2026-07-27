@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+
+# Model weights and media live outside the repo; never commit them.
+*.safetensors
+*.gguf
+*.mp4
+*.png
+*.jpg
+*.jpeg
+
+out/
+outputs/
+*.log

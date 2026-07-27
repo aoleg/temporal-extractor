@@ -1,0 +1,7 @@
+# Tool-side dependencies only -- installed into ..\.venv
+#
+# torch MUST NOT appear here, directly or transitively. The restorer's stack
+# lives in ..\.venv-seedvr2 behind a subprocess boundary precisely so its pins
+# cannot constrain this side.
+numpy
+opencv-python
