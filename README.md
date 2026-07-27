@@ -26,8 +26,39 @@ Only `restore/worker.py` imports torch.
 3. **restore** — decode `[i-k .. i+k]`, run SeedVR2 on the whole window, keep the centre. **built**
 4. **sheet** — contact sheet + manifest. **built**
 
-Each stage is runnable on its own from the CLI. They are not yet chained; a
-`run` command is the remaining piece.
+Each stage is runnable on its own from the CLI, and `run` chains all four.
+
+## Usage
+
+```
+..\.venv\Scripts\python.exe -m temporal_extractor.cli run <video>
+```
+
+Output is one self-contained directory, named after the video unless `--out`
+says otherwise:
+
+```
+<video_stem>/
+  stills/            the deliverable
+  contact_sheet.jpg  for review
+  manifest.json      what came from where
+  work/              scan.json, select.json
+```
+
+One directory to move or delete, and nothing orphaned if a run dies partway.
+
+### Resume
+
+Re-running picks up where it stopped. Resume state *is* the artifacts: a still
+that exists is a still that is done, a scan that exists need not be redone. There
+is no progress file to fall out of sync with reality. Everything is written to a
+temporary name and renamed into place, so a process killed mid-write leaves no
+half-file that a later run would mistake for finished work.
+
+The worker is only started when there is restoring left to do, so a fully
+resumed run does not pay ~10s of model materialisation to discover it has
+nothing to do — a complete re-run of a finished job takes **0.8s**. Use `--force`
+to redo everything.
 
 ## Still filename convention
 
@@ -93,42 +124,61 @@ the *noisiest* output as the sharpest.
 Reads the scan and writes a selection JSON. Never touches the video, so it runs
 instantly and is cheap to re-run while tuning.
 
-Four constraints are applied together, because sharpness alone picks twenty
-views of the same shot:
+### How many stills
+
+**There is no global count.** Each scene earns one still per
+`--seconds_per_still` (default 4.0) of its own duration, with a floor of one and
+a ceiling of `--per_scene_max` (default 8). The total is whatever the video's
+structure justifies.
+
+A global ceiling was deliberately rejected: set it below the scene count and
+whole scenes vanish silently, losing looks that exist nowhere else in the film.
+Scene length has to matter too — a 35-second take in which a character turns
+through several angles is worth more stills than a 7-second insert, and those
+angles are the point of the exercise.
+
+Quota is computed from the scene's **real duration**, not from how many of its
+frames survive filtering. They answer different questions: a scene with heavy
+motion blur is still as long as it is, it simply has fewer frames to choose from.
+Sizing quota off the survivors collapsed a whole scene to a single still.
+
+### The filters
 
 - **window fits the scene** — a pick is only eligible if `[i-k .. i+k]` lies
-  inside one scene. Blending frames across a cut is meaningless, so stage 3 must
-  never be handed a window that straddles one.
-- **spread** — picks are allocated across scenes in proportion to eligible
-  length (largest remainder, every scene guaranteed at least one), then each
-  scene is split into that many equal time segments and the sharpest acceptable
-  frame is taken from each.
-- **dedupe** — a candidate is rejected if its dHash is within `--hash_distance`
-  (default 16) of any pick already made, anywhere in the video.
-- **minimum gap** — no two picks closer than `--min_gap` seconds (default 1.0).
+  inside one scene. Blending across a cut is meaningless, so stage 3 must never
+  be handed a window that straddles one.
+- **weak-frame rejection** — the output is training data, so frames dimmer than
+  `--min_luma` (default 24) or softer than `--min_sharpness_frac` (default 0.35)
+  of **their own scene's** best are dropped outright. Judged per scene, never
+  against an absolute number: a dim scene on a long lens has its own scale.
+- **spread** — each scene is divided into as many equal **time** segments as it
+  has picks, and the sharpest surviving frame is taken from each.
+- **dedupe** — `--hash_distance` (default 8), deliberately loose. Two frames a
+  second apart in a close-up may differ by a collar coming into view or a slight
+  head turn: visually "the same shot", but genuinely different training
+  examples. This filter exists to catch frames that are *actually* redundant —
+  static shots, held frames — not to enforce variety.
+- **adaptive gap** — a floor of `--gap_fraction` (default 0.2) of the scene's own
+  natural spacing (`span / picks`), never below `--min_gap` (default 0.4s). A
+  backstop against two adjacent segments both picking at their shared boundary,
+  scaled per scene rather than one number imposed on a 7s insert and a 35s take
+  alike.
 
-The last two are not redundant, and neither is the segmentation. Each was added
-because the previous arrangement measurably failed on the sample footage:
+Each of these earned its place by fixing an observed failure:
 
 - Ranking a whole scene by sharpness put **six of seven picks inside one 5-second
-  span** of a 35-second take. Small movements in a close-up flip enough dHash
-  bits to clear the distance floor, so dedupe alone did not stop it. Hence
-  segmentation.
-- When dedupe starved a segment, filling the shortfall by sharpness dropped the
-  replacement **right beside an existing pick**, undoing the spread. The fill is
-  therefore *maximin*: take the candidate furthest in time from everything
-  already chosen, ties broken by sharpness. `filled_globally` in the output
-  reports how many picks came from it — a high number means the footage has less
-  variety than `--count` assumes.
-- Two adjacent segments can still both choose a frame near their shared
-  boundary, which put two picks 1 second apart. `--min_gap` is the backstop.
+  span** of a 35-second take.
+- Segmenting the *surviving-frame list* rather than the scene's **time span** put
+  two picks **half a second apart**, because weak-frame rejection had left the
+  survivors bunched into one part of the scene. Equal slices of the list were
+  not equal slices of the scene.
+- When a segment is starved, the shortfall is filled *within that scene* by
+  maximin — the candidate furthest in time from everything chosen, ties broken by
+  sharpness. Filling by sharpness alone put the replacement right beside an
+  existing pick. `filled` reports how often this fires.
 
 Cross-check: two encodes of the same film at 480p and 1080p, scanned and
 selected independently, agree on **14 of 15** picks to within one second.
-
-The stage will return fewer than `--count` rather than pad with near-duplicates,
-and says which knob to loosen. Asking a 60-second clip for 40 stills yielded 24 —
-that is the honest answer, not a failure.
 
 ## Stage 3: restore
 
@@ -200,11 +250,13 @@ timestamps and provenance; stills whose names do not match the convention are
 laid out but flagged as carrying no provenance.
 
 It is worth actually looking at the sheet rather than trusting the selection
-metrics. On the first 15-still run it immediately showed that picks #09 (f880)
-and #10 (f906) are the same photograph: they sit at dHash distance exactly 16 and
-exactly 1.04s apart, clearing both stage-2 floors by a hair. Tightening either
-floor relocates the pair rather than fixing it, because two adjacent segments of
-a long take keep choosing frames either side of their shared boundary.
+metrics — the first 15-still run put a nearly black frame in the set, which no
+sharpness number flagged. That is what drove weak-frame rejection into stage 2.
+
+`--seeds N` (default 1) produces N variants per still with consecutive seeds, all
+appearing on the one sheet. `pipeline.choose_variants()` is the seam for a future
+"keep only the sharpest variant" mode: it receives a pick's variants and returns
+those to keep, and the sheet and manifest follow whatever it returns.
 
 ## Memory
 

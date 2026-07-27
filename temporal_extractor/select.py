@@ -20,24 +20,46 @@ lie inside a single scene, because blending frames across a cut is meaningless.
 import json
 from pathlib import Path
 
-SELECT_VERSION = 1
+# 2: per-scene allocation with no global ceiling; weak-frame rejection;
+#    scene-adaptive minimum gap.
+SELECT_VERSION = 2
 
-DEFAULT_COUNT = 15
 DEFAULT_WINDOW = 5
 
-# Minimum dHash Hamming distance between any two picks. Measured on the sample
-# footage: adjacent frames score 0, frames 0.2s apart score 3, 1s apart score
-# 13, and 9s apart within one long take score 41. 16 keeps picks meaningfully
-# different without demanding they come from different shots.
-DEFAULT_HASH_DISTANCE = 16
+# How much scene time earns one still, before clamping. Scene length has to
+# matter: a 35s take of a character turning through several angles is worth more
+# stills than a 7s insert, and those angles are exactly what a LoRA needs.
+DEFAULT_SECONDS_PER_STILL = 4.0
 
-# No two picks closer than this many seconds. Segmentation already spreads picks,
-# but two adjacent segments can both choose a frame near their shared boundary,
-# which put two picks 1s apart in one shot on the sample footage. dHash cannot
-# catch that on its own: in a close-up, a second of small movement flips enough
-# bits to clear the distance floor while the picture is, for training purposes,
-# the same. This is the backstop for that case.
-DEFAULT_MIN_GAP_S = 1.0
+# Ceiling per scene, so one very long take cannot swamp the set. There is
+# deliberately NO global ceiling: with one, a film with more scenes than the
+# ceiling would silently lose whole scenes, which is worse than returning more
+# stills than expected.
+DEFAULT_PER_SCENE_MAX = 8
+
+# Minimum dHash distance between picks. Kept low on purpose. Two frames a second
+# apart in a close-up can differ by a shirt collar coming into view or a slight
+# head turn -- visually "the same shot", but genuinely different training
+# examples. This filter is here to catch frames that are actually redundant
+# (static shots, held frames), not to enforce variety.
+DEFAULT_HASH_DISTANCE = 8
+
+# Spread backstop, not a duplicate filter. The real spreading is done by
+# segmentation; this only stops two adjacent segments from both picking right at
+# their shared boundary. Expressed as a fraction of the scene's own natural
+# spacing (eligible length / picks), so it scales with the scene instead of
+# imposing one number on a 7s insert and a 35s take alike.
+DEFAULT_GAP_FRACTION = 0.2
+DEFAULT_MIN_GAP_S = 0.4
+
+# Weak-frame rejection. The output is training data; a near-black or badly soft
+# frame is not worth a restore pass, let alone a slot in the set.
+#
+# Sharpness is judged relative to the best frame in its own scene, never against
+# an absolute number: variance of Laplacian is not comparable across scenes, let
+# alone across videos. A dim scene shot on a long lens has its own scale.
+DEFAULT_MIN_SHARPNESS_FRAC = 0.35
+DEFAULT_MIN_LUMA = 24.0
 
 
 def hamming(a: str, b: str) -> int:
@@ -45,77 +67,113 @@ def hamming(a: str, b: str) -> int:
     return bin(int(a, 16) ^ int(b, 16)).count("1")
 
 
-def _allocate(scene_capacity: dict, count: int, max_per_scene: int | None) -> dict:
+def _allocate(eligible: dict, scenes: dict, fps: float, seconds_per_still: float,
+              per_scene_max: int) -> dict:
     """
-    Spread `count` picks over scenes in proportion to how many eligible frames
-    each holds, by largest remainder, with every non-empty scene guaranteed at
-    least one pick so a short scene is not shut out by a long one.
+    Decide how many stills each scene earns, from its own length alone.
+
+    Every scene with a usable frame gets at least one -- a short scene is still a
+    distinct look, and dropping it loses that look entirely. Beyond the first,
+    scenes earn a still per `seconds_per_still` of screen time, capped by
+    `per_scene_max`. No global total: the video's structure sets the count.
+
+    Screen time here is the scene's real duration, NOT the number of frames that
+    survived weak-frame rejection. Those are different questions: a 12s scene
+    with heavy motion blur is still a 12s scene and still deserves its share of
+    the output, it just has fewer frames to choose from. Sizing the quota off the
+    survivors made a whole scene collapse to one still because half its frames
+    were soft.
     """
-    scenes = [s for s, cap in scene_capacity.items() if cap > 0]
-    if not scenes or count <= 0:
-        return {}
-
-    quota = {s: 1 for s in scenes[:count]}
-    remaining = count - len(quota)
-
-    if remaining > 0:
-        total = sum(scene_capacity[s] for s in quota)
-        exact = {s: remaining * scene_capacity[s] / total for s in quota}
-        for s in quota:
-            quota[s] += int(exact[s])
-        leftover = count - sum(quota.values())
-        # Largest fractional remainder wins the odd picks.
-        for s in sorted(quota, key=lambda s: exact[s] - int(exact[s]), reverse=True)[:leftover]:
-            quota[s] += 1
-
-    # Never promise a scene more picks than it has frames to give.
-    for s in quota:
-        quota[s] = min(quota[s], scene_capacity[s])
-        if max_per_scene is not None:
-            quota[s] = min(quota[s], max_per_scene)
+    quota = {}
+    for sid, frames in eligible.items():
+        if not frames:
+            continue
+        scene = scenes[sid]
+        seconds = (scene["end"] - scene["start"] + 1) / fps
+        earned = int(round(seconds / seconds_per_still)) if seconds_per_still > 0 else 1
+        quota[sid] = max(1, min(earned, per_scene_max, len(frames)))
     return quota
 
 
-def select_frames(meta: dict, *, count: int = DEFAULT_COUNT, window: int = DEFAULT_WINDOW,
+def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
+                  seconds_per_still: float = DEFAULT_SECONDS_PER_STILL,
+                  per_scene_max: int = DEFAULT_PER_SCENE_MAX,
                   hash_distance: int = DEFAULT_HASH_DISTANCE,
                   min_gap_s: float = DEFAULT_MIN_GAP_S,
-                  max_per_scene: int | None = None) -> dict:
+                  gap_fraction: float = DEFAULT_GAP_FRACTION,
+                  min_sharpness_frac: float = DEFAULT_MIN_SHARPNESS_FRAC,
+                  min_luma: float = DEFAULT_MIN_LUMA) -> dict:
     """
     Pick frames to restore. Returns a select-metadata dict.
 
-    meta:           the dict written by stage 1
-    count:          how many stills to aim for
-    window:         restore window size; picks are kept far enough from a cut
-                    that the whole window stays inside one scene
-    hash_distance:  minimum dHash Hamming distance between any two picks
-    min_gap_s:      minimum time between any two picks, in seconds
-    max_per_scene:  optional cap so one long take cannot dominate
+    meta:                the dict written by stage 1
+    window:              restore window size; picks are kept far enough from a
+                         cut that the whole window stays inside one scene
+    seconds_per_still:   scene time that earns one still
+    per_scene_max:       ceiling per scene (there is no global ceiling)
+    hash_distance:       minimum dHash Hamming distance between picks
+    min_gap_s:           absolute floor on the gap between picks
+    gap_fraction:        gap floor as a fraction of a scene's natural spacing
+    min_sharpness_frac:  reject frames below this fraction of their scene's best
+    min_luma:            reject frames dimmer than this mean luminance
     """
     if window < 5 or window % 4 != 1:
         raise ValueError(f"window must be 4n+1 and at least 5, got {window}")
+    if meta.get("scan_version", 1) < 2 and min_luma > 0:
+        raise ValueError(
+            "this scan predates per-frame luma, so near-black frames cannot be "
+            "rejected; re-run the scan stage, or pass min_luma=0"
+        )
 
-    min_gap = int(round(min_gap_s * meta["video"]["fps"]))
+    fps = meta["video"]["fps"]
+    min_gap = int(round(min_gap_s * fps))
 
     half = window // 2
     frames = meta["frames"]
     scenes = {s["id"]: s for s in meta["scenes"]}
 
-    # Eligible = a full window fits inside this frame's own scene. Kept in frame
-    # order, because the selection below slices these ranges by time.
+    # Eligible = a full window fits inside this frame's own scene, and the frame
+    # is worth restoring at all. Kept in frame order: the selection below slices
+    # these ranges by time.
     eligible = {}
+    rejected = {"too_dark": 0, "too_soft": 0}
     for scene in meta["scenes"]:
         lo, hi = scene["start"] + half, scene["end"] - half
-        eligible[scene["id"]] = [frames[i] for i in range(lo, hi + 1)] if hi >= lo else []
+        pool = [frames[i] for i in range(lo, hi + 1)] if hi >= lo else []
+        # Judged against this scene's own best, never an absolute threshold.
+        floor = scene["best_sharpness"] * min_sharpness_frac
+        keep = []
+        for f in pool:
+            if min_luma > 0 and f.get("luma", 255) < min_luma:
+                rejected["too_dark"] += 1
+            elif f["sharpness"] < floor:
+                rejected["too_soft"] += 1
+            else:
+                keep.append(f)
+        eligible[scene["id"]] = keep
 
     skipped = [s["id"] for s in meta["scenes"] if not eligible[s["id"]]]
-    quota = _allocate({sid: len(v) for sid, v in eligible.items()}, count, max_per_scene)
+    quota = _allocate(eligible, scenes, fps, seconds_per_still, per_scene_max)
+
+    # Scene-adaptive gap: a scene taking q picks across its own span has a
+    # natural spacing of span/q, and picks should not crowd far inside that.
+    # Measured on the span, not on the surviving frame count, for the same
+    # reason the quota is -- survivors can be bunched into part of the scene.
+    scene_span = {}
+    scene_gap = {}
+    for sid, q in quota.items():
+        scene = scenes[sid]
+        lo, hi = scene["start"] + half, scene["end"] - half
+        scene_span[sid] = (lo, hi)
+        scene_gap[sid] = max(min_gap, int(gap_fraction * (hi - lo + 1) / q))
 
     chosen = []
 
-    def accepts(frame):
+    def accepts(frame, sid=None):
         """Reject anything too close to something already picked, anywhere."""
+        gap = scene_gap.get(sid, min_gap) if sid is not None else min_gap
         return all(
-            abs(frame["i"] - c["i"]) >= min_gap
+            abs(frame["i"] - c["i"]) >= (gap if c.get("scene") == sid else min_gap)
             and hamming(frame["dhash"], c["dhash"]) >= hash_distance
             for c in chosen
         )
@@ -128,15 +186,23 @@ def select_frames(meta: dict, *, count: int = DEFAULT_COUNT, window: int = DEFAU
     # still passed the dHash floor, because small movements in a close-up flip
     # plenty of hash bits. Segmenting forces temporal spread, and picking the
     # local best within each segment keeps the sharpness criterion intact.
+    #
+    # Segments are spans of TIME, not equal slices of the surviving-frame list.
+    # Slicing the list put two picks half a second apart: weak-frame rejection
+    # had left survivors bunched into one part of the scene, so equal slices of
+    # the list were not equal slices of the scene.
     for sid in sorted(quota):
-        pool = eligible[sid]
         q = quota[sid]
+        lo, hi = scene_span[sid]
+        span = hi - lo + 1
+        by_index = {f["i"]: f for f in eligible[sid]}
         for k in range(q):
-            lo = k * len(pool) // q
-            hi = (k + 1) * len(pool) // q
-            segment = sorted(pool[lo:hi], key=lambda f: f["sharpness"], reverse=True)
+            seg_lo = lo + k * span // q
+            seg_hi = lo + (k + 1) * span // q
+            segment = sorted((by_index[i] for i in range(seg_lo, seg_hi) if i in by_index),
+                             key=lambda f: f["sharpness"], reverse=True)
             for frame in segment:
-                if accepts(frame):
+                if accepts(frame, sid):
                     chosen.append(frame)
                     break
 
@@ -148,15 +214,19 @@ def select_frames(meta: dict, *, count: int = DEFAULT_COUNT, window: int = DEFAU
     # segment of a long take had nothing acceptable, the sharpest frame left in
     # the whole video sat right beside an existing pick, and the fill dropped it
     # there -- two picks 1.2s apart. Maximin keeps the set spread out.
+    # The fill stays WITHIN the starved scene. Each scene's count is a promise
+    # derived from its own length, so borrowing a pick from elsewhere to hit a
+    # number would misrepresent the video's structure.
     filled = 0
-    if len(chosen) < count:
-        picked = {f["i"] for f in chosen}
-        pool = [f for group in eligible.values() for f in group if f["i"] not in picked]
-        while len(chosen) < count:
+    picked = {f["i"] for f in chosen}
+    for sid in sorted(quota):
+        have = sum(1 for c in chosen if c.get("scene") == sid)
+        pool = [f for f in eligible[sid] if f["i"] not in picked]
+        while have < quota[sid]:
             best = None
             best_key = None
             for frame in pool:
-                if frame["i"] in picked or not accepts(frame):
+                if frame["i"] in picked or not accepts(frame, sid):
                     continue
                 key = (min(abs(frame["i"] - c["i"]) for c in chosen) if chosen else 0,
                        frame["sharpness"])
@@ -166,6 +236,7 @@ def select_frames(meta: dict, *, count: int = DEFAULT_COUNT, window: int = DEFAU
                 break
             chosen.append(best)
             picked.add(best["i"])
+            have += 1
             filled += 1
 
     chosen.sort(key=lambda f: f["i"])
@@ -186,20 +257,25 @@ def select_frames(meta: dict, *, count: int = DEFAULT_COUNT, window: int = DEFAU
         "video": meta["video"],
         "content_box": box,
         "select": {
-            "requested": count,
             "selected": len(picks),
             "window": window,
+            "seconds_per_still": seconds_per_still,
+            "per_scene_max": per_scene_max,
             "hash_distance": hash_distance,
             "min_gap_s": min_gap_s,
             "min_gap_frames": min_gap,
-            "max_per_scene": max_per_scene,
+            "gap_fraction": gap_fraction,
+            "scene_gap_frames": {str(k): v for k, v in sorted(scene_gap.items())},
+            "min_sharpness_frac": min_sharpness_frac,
+            "min_luma": min_luma,
+            "rejected_weak": rejected,
             "scene_quota": {str(k): v for k, v in sorted(quota.items())},
-            "scenes_too_short": skipped,
+            "scenes_unusable": skipped,
             "eligible_frames": sum(len(v) for v in eligible.values()),
-            # How many picks came from the maximin fill rather than a segment.
-            # A high number means dedupe is starving segments -- the footage has
-            # less variety than `count` assumes.
-            "filled_globally": filled,
+            # Picks that came from the within-scene maximin fill rather than
+            # from their own segment. A high number means the scene has less
+            # variety than its length suggests.
+            "filled": filled,
         },
         "scenes": [scenes[sid] for sid in sorted(scenes)],
         "picks": picks,

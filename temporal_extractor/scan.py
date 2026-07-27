@@ -26,7 +26,8 @@ import numpy as np
 
 from .frames import content_box_from_projection
 
-SCAN_VERSION = 1
+# 2: added per-frame luma, so stage 2 can reject near-black frames.
+SCAN_VERSION = 2
 
 # Scene score at or above this is treated as a cut. Same scale as PySceneDetect's
 # ContentDetector default.
@@ -167,6 +168,10 @@ def scan_video(path, *, scene_threshold: float = DEFAULT_SCENE_THRESHOLD,
             "i": index,
             "t": round(index / fps, 4),
             "sharpness": round(sharpness, 4),
+            # Mean luminance of the picture area. A fade or an unlit shot can be
+            # perfectly in focus and still be useless as training data, and
+            # sharpness alone will not tell you that.
+            "luma": round(float(gray.mean()), 2),
             "delta": round(delta, 4),
             "dhash": dhash(gray),
         })
