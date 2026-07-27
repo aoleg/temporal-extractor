@@ -75,10 +75,12 @@ class SeedVR2Restorer:
         if self._proc is not None:
             return self
 
-        if not self.python.exists():
+        problems = cfg.check()
+        if problems:
             raise RestoreError(
-                f"SeedVR2 interpreter not found: {self.python}\n"
-                "The worker needs the venv that has torch; set VIDSTILLS_SEEDVR2_PYTHON."
+                "the restorer is not configured:\n  - "
+                + "\n  - ".join(problems)
+                + f"\nEdit {cfg.ENV_FILE}, then run: extract.bat doctor"
             )
 
         # Bind an ephemeral port and let the worker dial back, so stdout stays

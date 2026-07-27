@@ -1,282 +1,151 @@
 # temporal_extractor
 
-Extracts a small number of high-quality stills from a low-quality video, for use
-as LoRA training data. Each still is reconstructed from a **window of
-neighbouring frames** rather than from a single frame — that is the entire point
-of the tool. There is no single-image fallback.
+An automated tool for extracting high-quality stills from video, for use as
+**LoRA training data**.
 
-## The two-venv split
+The stills come out at higher quality and higher resolution than the source video
+provides. That is possible because each still is reconstructed from a **window of
+neighbouring frames** rather than from a single frame: detail that is destroyed
+in any one frame by compression, noise or motion often survives in its
+neighbours, and a multi-frame restoration model can recover it. This is
+essentially the same temporal restoration technique behind many commercial
+upscales.
 
-| | interpreter | may import torch |
-|---|---|---|
-| the tool | `..\.venv` | **no** |
-| the restore worker | `..\.venv-seedvr2` | yes |
+The tool also does the tedious part: it watches the whole video, finds the scene
+boundaries, scores every frame, throws away the blurred and the near-black, and
+picks a spread of sharp, genuinely different shots — then hands you a contact
+sheet to choose from.
 
-The restorer sits behind a narrow interface — `restore(frames) -> ndarray` — and
-runs as a subprocess under its own venv. The model's dependency pins therefore
-cannot dictate what the tool is allowed to use. `temporal_extractor.restore`
-exports only the client; `worker.py` is never imported in-process.
+## What it works best on
 
-Only `restore/worker.py` imports torch.
+**Original, non-upscaled sources.** A genuine 480p or 720p transfer, heavily
+compressed, is the ideal input: the temporal information is real, and there is
+plenty of headroom to recover. Measured on a 480p source, a 3× upscale produced
+detail no single-frame method can reach — hair resolving into separate strands,
+irises gaining structure, skin gaining texture rather than the usual plastic
+smear.
 
-## Stages
+**Already-upscaled video still works, but the benefit shifts.** If the source has
+already been through an upscaler, the detail the model would recover has largely
+been synthesised or destroyed already, and there is little headroom left. On a
+1080p transfer the same pipeline gained 2.8× sharpness against 7.5× on the 480p
+one. On such material the value is mostly in the *other* half of the tool —
+scene detection, frame scoring and picking the best, most varied shots — rather
+than in enhancing a poor source.
 
-1. **scan** — decode, score every frame, detect scene boundaries, write metadata. CPU only. **built**
-2. **select** — pick the best N frames, deduped and spread across scenes. **built**
-3. **restore** — decode `[i-k .. i+k]`, run SeedVR2 on the whole window, keep the centre. **built**
-4. **sheet** — contact sheet + manifest. **built**
+If you have both an original and an upscale of the same footage, feed it the
+original.
 
-Each stage is runnable on its own from the CLI, and `run` chains all four.
+## Requirements
 
-## Usage
+- Windows, a recent Python on `PATH` (no specific version required)
+- An NVIDIA GPU. Comfortable at 1080p on 12 GB; 1440p with long windows wants
+  closer to 20 GB
+- A [SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) checkout,
+  its model files, and **a separate virtualenv with torch installed** for it
+
+That last point is deliberate. The restorer runs as a subprocess in its own
+virtualenv, behind a narrow `restore(frames) -> ndarray` interface, so the
+model's dependency pins cannot dictate what this tool is allowed to use. Nothing
+in the tool's own process imports torch.
+
+## Install
 
 ```
-..\.venv\Scripts\python.exe -m temporal_extractor.cli run <video>
+install.bat
 ```
 
-Output is one self-contained directory, named after the video unless `--out`
-says otherwise:
+Creates a virtualenv in `.venv`, installs numpy and OpenCV, and writes a `.env`
+from the template. Then open `.env` and set the one required variable:
 
 ```
-<video_stem>/
+SEEDVR2_REPO=D:\path\to\ComfyUI-SeedVR2_VideoUpscaler
+```
+
+Everything else is derived from it for a standard layout. Check your setup:
+
+```
+extract.bat doctor
+```
+
+which validates every path and starts the restore worker to confirm it loads.
+
+## Use
+
+```
+extract.bat run myvideo.mp4
+```
+
+That is the whole thing. Output lands in a folder beside the video:
+
+```
+myvideo/
   stills/            the deliverable
   contact_sheet.jpg  for review
-  manifest.json      what came from where
-  work/              scan.json, select.json
+  manifest.json      which source frames produced each still
+  work/              intermediates
 ```
 
-One directory to move or delete, and nothing orphaned if a run dies partway.
+Re-running continues where it left off, so an interrupted job costs nothing to
+resume and a finished one re-runs in under a second.
 
-### Resume
-
-Re-running picks up where it stopped. Resume state *is* the artifacts: a still
-that exists is a still that is done, a scan that exists need not be redone. There
-is no progress file to fall out of sync with reality. Everything is written to a
-temporary name and renamed into place, so a process killed mid-write leaves no
-half-file that a later run would mistake for finished work.
-
-The worker is only started when there is restoring left to do, so a fully
-resumed run does not pay ~10s of model materialisation to discover it has
-nothing to do — a complete re-run of a finished job takes **0.8s**. Use `--force`
-to redo everything.
-
-## Still filename convention
+### Common adjustments
 
 ```
-<video_stem>_s<scene:03d>_f<frame:06d>[_seed<n>].png
+extract.bat run video.mp4 --seconds_per_still 2      more stills
+extract.bat run video.mp4 --per_scene_max 3          fewer from long takes
+extract.bat run video.mp4 --resolution 1440          bigger output
+extract.bat run video.mp4 --window 9                 more temporal context
+extract.bat run video.mp4 --out D:\dataset\clip01    choose the output folder
 ```
 
-Defined once in `sheet.still_name()` and parsed back by `sheet.parse_still_name()`.
-Stage 4 recovers scene, source frame and seed from the name, so a folder of
-stills is self-describing even without the selection JSON — though with it, the
-sheet and manifest also carry timestamps and full source-frame provenance.
+There is no global "give me N stills" setting. Each scene earns stills in
+proportion to its own length, so the total is whatever the video's structure
+justifies — a film with forty scenes will not silently drop thirty of them to
+satisfy a number.
 
-## Stage 1: scan
+### The individual stages
 
-```
-..\.venv\Scripts\python.exe -m temporal_extractor.cli scan <video> [--out <json>]
-```
+Each stage runs on its own, which is how the pipeline is meant to be tuned and
+debugged:
 
-One decode pass produces everything downstream needs, so nothing re-decodes the
-video until stage 3 wants real pixels. Per frame it records index, timestamp,
-variance-of-Laplacian sharpness, scene-change delta, dHash and scene id; per
-scene, the bounds and the sharpest member.
-
-**Scene detection** is the mean absolute difference of the HSV channels between
-consecutive frames — the same idea as PySceneDetect's `ContentDetector`, and
-`--scene_threshold` is on the same scale (default 27.0) — computed inline on
-frames we are already decoding rather than pulling in `scenedetect` and a second
-decode pass. Hue is compared circularly so a red-to-red transition does not read
-as a cut. On the sample footage the metric is sharply bimodal (real cuts at
-46–69, everything else below 9), so any threshold from 10 to 45 gives the same
-answer; 27.0 sits in the middle of that gap. Two encodes of the same film at
-480p and 1080p yield identical scene boundaries.
-
-**Content box** detection is on by default, taking the union of non-matte area
-over 60 frames spread through the video — one frame is not enough, because fades
-and dark shots under-report it. Sharpness is then measured on picture only. This
-is not merely a compute saving: measured against a full-frame scan, rank
-correlation is 0.981, and the sharpest frame of one scene out of four changed.
-The bars carry per-frame compression noise, so they are not a constant offset.
-
-**dHash** is what gives stage 2 diversity, and scene id alone would not be
-enough: within a single 35-second take, two frames 9 seconds apart scored a
-Hamming distance of 41, further apart than two frames from *different* scenes
-(27). Adjacent frames score 0, so slow pans dedupe cleanly.
-
-Scan cost is decode-bound: ~6s for 1517 frames at 848×480, ~25s for 1536 frames
-at 1920×1080.
-
-### A warning about the sharpness numbers
-
-Variance of Laplacian is **not** scale-invariant and **rises with invented
-noise**. The same film scored a peak of 470 at 480p and 53 at 1080p. Use it to
-rank frames within one video at one resolution; never threshold on an absolute
-value, and never rank a generation sweep by it — at `cfg_scale` 3.0 it reports
-the *noisiest* output as the sharpest.
-
-## Stage 2: select
+| | | |
+|---|---|---|
+| 1 | `scan` | decode once, score every frame, find scenes, measure the content box |
+| 2 | `select` | choose which frames to restore — sharp, spread out, not redundant |
+| 3 | `restore` | run a window through the model, keep the centre frame |
+| 4 | `sheet` | contact sheet and manifest |
 
 ```
-..\.venv\Scripts\python.exe -m temporal_extractor.cli select <scan.json> [--count 15]
+extract.bat scan video.mp4
+extract.bat select video.scan.json
+extract.bat restore path\to\window\ --resolution 1440
+extract.bat sheet stills\ --selection video.select.json
 ```
 
-Reads the scan and writes a selection JSON. Never touches the video, so it runs
-instantly and is cheap to re-run while tuning.
+Stage 1 is seconds and CPU-only. Stage 2 is instant and reads only the scan, so
+it is cheap to re-run while tuning. Stage 3 is the expensive one — roughly 9–14
+seconds per still at 1080p on an RTX 5090, with the model loaded once and reused.
 
-### How many stills
+## Full command reference
 
-**There is no global count.** Each scene earns one still per
-`--seconds_per_still` (default 4.0) of its own duration, with a floor of one and
-a ceiling of `--per_scene_max` (default 8). The total is whatever the video's
-structure justifies.
+**[docs/docs.md](docs/docs.md)** — every command, every option, the memory and
+tiling guidance, and the measured behaviour behind the defaults.
 
-A global ceiling was deliberately rejected: set it below the scene count and
-whole scenes vanish silently, losing looks that exist nowhere else in the film.
-Scene length has to matter too — a 35-second take in which a character turns
-through several angles is worth more stills than a 7-second insert, and those
-angles are the point of the exercise.
+## Notes worth knowing
 
-Quota is computed from the scene's **real duration**, not from how many of its
-frames survive filtering. They answer different questions: a scene with heavy
-motion blur is still as long as it is, it simply has fewer frames to choose from.
-Sizing quota off the survivors collapsed a whole scene to a single still.
+**Window sizes** must be 4n+1 (5, 9, 13, …) and at least 5. SeedVR2 is a
+multi-frame model and the VAE downsamples time by 4. There is no single-image
+fallback: without neighbouring frames the tool has no reason to exist.
 
-### The filters
+**Pillar/letterboxing** is detected and cropped automatically. Beyond saving the
+compute, it changes which frames get picked — the bars carry per-frame
+compression noise, so they are not a constant offset.
 
-- **window fits the scene** — a pick is only eligible if `[i-k .. i+k]` lies
-  inside one scene. Blending across a cut is meaningless, so stage 3 must never
-  be handed a window that straddles one.
-- **weak-frame rejection** — the output is training data, so frames dimmer than
-  `--min_luma` (default 24) or softer than `--min_sharpness_frac` (default 0.35)
-  of **their own scene's** best are dropped outright. Judged per scene, never
-  against an absolute number: a dim scene on a long lens has its own scale.
-- **spread** — each scene is divided into as many equal **time** segments as it
-  has picks, and the sharpest surviving frame is taken from each.
-- **dedupe** — `--hash_distance` (default 8), deliberately loose. Two frames a
-  second apart in a close-up may differ by a collar coming into view or a slight
-  head turn: visually "the same shot", but genuinely different training
-  examples. This filter exists to catch frames that are *actually* redundant —
-  static shots, held frames — not to enforce variety.
-- **adaptive gap** — a floor of `--gap_fraction` (default 0.2) of the scene's own
-  natural spacing (`span / picks`), never below `--min_gap` (default 0.4s). A
-  backstop against two adjacent segments both picking at their shared boundary,
-  scaled per scene rather than one number imposed on a 7s insert and a 35s take
-  alike.
+**Sharpness scores rank frames within one video at one resolution.** Variance of
+Laplacian is not scale-invariant and rises with invented noise. Don't compare the
+numbers across videos, and don't rank a parameter sweep by them.
 
-Each of these earned its place by fixing an observed failure:
-
-- Ranking a whole scene by sharpness put **six of seven picks inside one 5-second
-  span** of a 35-second take.
-- Segmenting the *surviving-frame list* rather than the scene's **time span** put
-  two picks **half a second apart**, because weak-frame rejection had left the
-  survivors bunched into one part of the scene. Equal slices of the list were
-  not equal slices of the scene.
-- When a segment is starved, the shortfall is filled *within that scene* by
-  maximin — the candidate furthest in time from everything chosen, ties broken by
-  sharpness. Filling by sharpness alone put the replacement right beside an
-  existing pick. `filled` reports how often this fires.
-
-Cross-check: two encodes of the same film at 480p and 1080p, scanned and
-selected independently, agree on **14 of 15** picks to within one second.
-
-## Stage 3: restore
-
-```
-..\.venv\Scripts\python.exe -m temporal_extractor.cli restore <png_dir> [options]
-```
-
-Sweep three seeds at 1440p on a pillarboxed source:
-
-```
-..\.venv\Scripts\python.exe -m temporal_extractor.cli restore samples\window_480_37s ^
-    --window 9 --resolution 1440 --crop_pillarbox --vae_encode_tiled --seeds 3
-```
-
-The worker is started once and reused for every window and every seed. Model
-materialisation dominates a single call (~10s of a ~13s 1080p window), so a warm
-worker is worth roughly 25% per subsequent window and far more across a sweep.
-
-## Window sizes
-
-Windows must be **4n+1** (5, 9, 13, …) because the VAE downsamples temporally by
-4, and at least 5 frames so there is temporal information to exploit.
-
-## Generation parameters
-
-`resolution` (target **short** side), `seed`, `cfg_scale`, `input_noise_scale`,
-`latent_noise_scale`, `color_correction` — all per call, none hardcoded.
-
-### cfg_scale
-
-Defaults to **1.0 (off)**, and is **not clamped** — because only the centre frame
-of each window is kept, temporal flicker across the window is irrelevant, so
-still-image values are legitimate to explore.
-
-Two things worth knowing before sweeping it:
-
-- The reference repo wires `cfg_scale` all the way to the model, then
-  `upscale_all_batches()` overwrites `config.diffusion.cfg.scale = 1.0` on entry
-  and never passes `cfg_scale` to `inference()`. Setting the config is therefore
-  silently discarded; the worker injects the argument into `runner.inference`
-  instead, which is the only route that reaches the model.
-- Measured on the 7B one-step distilled checkpoint, `cfg > 1.0` adds invented
-  high-frequency speckle rather than recovering detail. Noise on a flat
-  background patch climbed monotonically (0.775 → 1.259 from cfg 1.0 → 3.0) while
-  true sharpness fell. **Laplacian sharpness rises at cfg 3.0 purely because of
-  that speckle** — ranking a sweep by sharpness will pick the worst image.
-
-Any `cfg_scale != 1.0` runs both DiT branches and roughly doubles phase 2.
-
-## Stage 4: sheet
-
-```
-..\.venv\Scripts\python.exe -m temporal_extractor.cli sheet <stills_dir> --selection <select.json>
-```
-
-Writes a contact sheet JPEG and a manifest JSON.
-
-The **contact sheet** is for manual review, so every cell is labelled with what
-you need to act on it: source frame, timestamp, scene, seed, the window it came
-from, and output dimensions. Cells are ordered by source frame, and sized from
-the median aspect so one odd-shaped still cannot stretch the grid.
-
-The **manifest** records, per still, the exact source frames that produced it —
-the one fact you cannot recover by looking at the PNG later — plus the video,
-content box, selection parameters and scene table.
-
-Both degrade gracefully. Without `--selection` you still get a sheet, minus
-timestamps and provenance; stills whose names do not match the convention are
-laid out but flagged as carrying no provenance.
-
-It is worth actually looking at the sheet rather than trusting the selection
-metrics — the first 15-still run put a nearly black frame in the set, which no
-sharpness number flagged. That is what drove weak-frame rejection into stage 2.
-
-`--seeds N` (default 1) produces N variants per still with consecutive seeds, all
-appearing on the one sheet. `pipeline.choose_variants()` is the seam for a future
-"keep only the sharpest variant" mode: it receives a pick's variants and returns
-those to keep, and the sheet and manifest follow whatever it returns.
-
-## Memory
-
-Peaks scale with output pixels × window length. Measured on a 32GB RTX 5090:
-
-| window | output | time | peak VRAM |
-|---|---|---|---|
-| 5 | 1920×1080 | 13.5s | 11.3 GB |
-| 9 | 1914×1440 | 22.9s | 18.0 GB |
-
-Above ~1080p or with long windows you need `--vae_encode_tiled`; encode and
-decode are two separate peaks. At 1440p with a 9-frame window, encode tiling plus
-`--crop_pillarbox` was the difference between running and a hard OOM.
-
-`PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync` is set by the worker before
-torch is imported. Without it the allocator fragments during VAE decode and
-spills to system RAM — measured at ~8GB paged, turning a 3s decode into 100s.
-
-## Configuration
-
-Paths come from `config.py` and can be overridden by environment variable:
-`VIDSTILLS_SEEDVR2_PYTHON`, `VIDSTILLS_SEEDVR2_REPO`, `VIDSTILLS_MODEL_DIR`,
-`VIDSTILLS_DIT_MODEL`, `VIDSTILLS_VAE_MODEL`.
+**`cfg_scale` defaults to 1.0 (off)** and is not clamped. On the one-step
+distilled checkpoint, raising it adds high-frequency speckle rather than detail.
+See [docs/docs.md](docs/docs.md#generation-parameters) for the measurements.

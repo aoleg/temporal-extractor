@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 .venv-*/
 
+# Machine-specific paths. .env.example is the tracked template.
+.env
+
 # Model weights and media live outside the repo; never commit them.
 *.safetensors
 *.gguf

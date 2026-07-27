@@ -36,6 +36,8 @@ from temporal_extractor.protocol import (
     send_message,
 )
 
+if cfg.SEEDVR2_REPO is None:
+    sys.exit("SEEDVR2_REPO is not set; see .env in the project root")
 if str(cfg.SEEDVR2_REPO) not in sys.path:
     sys.path.insert(0, str(cfg.SEEDVR2_REPO))
 

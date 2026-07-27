@@ -1,10 +1,8 @@
 """
-Stage 3 on the command line: window in, restored centre frame(s) out.
+Command line for every stage.
 
-Exists so the restore stage can be exercised and swept in isolation, which is
-how the pipeline is meant to be debugged -- each stage runnable on its own.
-
-    T:\\claude\\vidstills\\.venv\\Scripts\\python.exe -m temporal_extractor.cli restore <png_dir>
+Each stage is runnable on its own so it can be debugged and swept in isolation,
+and `run` chains all four. Invoked through extract.bat / extract.py.
 """
 
 import argparse
@@ -259,6 +257,39 @@ def cmd_restore(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    """Check the configuration before a long run discovers it is broken."""
+    print(f"config file: {cfg.ENV_FILE}"
+          f"{'' if cfg.ENV_FILE.exists() else '   (MISSING -- run install.bat)'}")
+    print(f"  SEEDVR2_REPO   {cfg.SEEDVR2_REPO}")
+    print(f"  SEEDVR2_PYTHON {cfg.SEEDVR2_PYTHON}")
+    print(f"  MODEL_DIR      {cfg.MODEL_DIR}")
+    print(f"  DIT_MODEL      {cfg.DIT_MODEL}")
+    print(f"  VAE_MODEL      {cfg.VAE_MODEL}")
+    print()
+
+    problems = cfg.check()
+    if problems:
+        print("PROBLEMS:")
+        for problem in problems:
+            print(f"  - {problem}")
+        print(f"\nEdit {cfg.ENV_FILE} and try again.")
+        return 1
+
+    print("paths OK. Starting the restore worker to confirm it loads ...")
+    try:
+        with SeedVR2Restorer(quiet=True) as restorer:
+            info = restorer.info
+            print(f"  worker OK: pid {info.get('pid')}, torch {info.get('torch')}, "
+                  f"{info.get('device')}")
+    except Exception as exc:
+        print(f"  worker FAILED: {exc}")
+        return 1
+
+    print("\nEverything is wired up.")
+    return 0
+
+
 def cmd_run(args) -> int:
     run_pipeline(
         args.video,
@@ -352,6 +383,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="temporal_extractor",
                                  description="Extract high-quality stills from low-quality video.")
     sub = ap.add_subparsers(dest="command", required=True)
+
+    doc = sub.add_parser("doctor", help="check configuration and that the restorer loads")
+    doc.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("scan", help="stage 1: score every frame, find scenes, write metadata JSON")
     s.add_argument("video", help="input video file")
