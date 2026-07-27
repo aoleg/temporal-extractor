@@ -18,6 +18,7 @@ from .restore import SeedVR2Restorer
 from .scan import (
     DEFAULT_MIN_SCENE_LEN,
     DEFAULT_SCENE_THRESHOLD,
+    DEFAULT_WORKERS,
     read_scan,
     scan_video,
     write_scan,
@@ -62,19 +63,7 @@ def cmd_scan(args) -> int:
     if not video.exists():
         raise SystemExit(f"no such video: {video}")
 
-    def progress(done, total):
-        pct = f" ({100 * done / total:.0f}%)" if total > 0 else ""
-        print(f"\r  scanned {done} frames{pct}", end="", flush=True)
-
-    meta = scan_video(
-        video,
-        scene_threshold=args.scene_threshold,
-        min_scene_len=args.min_scene_len,
-        detect_content_box=not args.no_content_box,
-        progress=None if args.quiet else progress,
-    )
-    if not args.quiet:
-        print()
+    meta = scan_video(video, **scan_kwargs(args), show_progress=not args.quiet)
 
     out = Path(args.out) if args.out else video.with_suffix(".scan.json")
     write_scan(meta, out)
@@ -100,6 +89,16 @@ def cmd_scan(args) -> int:
 
     print(f"scanned in {meta['scan']['elapsed_s']:.1f}s -> {out}")
     return 0
+
+
+def scan_kwargs(args) -> dict:
+    """The scan-stage knobs, shared by `scan` and `run`."""
+    return {
+        "scene_threshold": args.scene_threshold,
+        "min_scene_len": args.min_scene_len,
+        "detect_content_box": not args.no_content_box,
+        "workers": args.workers,
+    }
 
 
 def select_kwargs(args) -> dict:
@@ -297,11 +296,7 @@ def cmd_run(args) -> int:
     run_pipeline(
         args.video,
         args.out,
-        scan_opts={
-            "scene_threshold": args.scene_threshold,
-            "min_scene_len": args.min_scene_len,
-            "detect_content_box": not args.no_content_box,
-        },
+        scan_opts={**scan_kwargs(args), "show_progress": not args.quiet},
         select_opts=select_kwargs(args),
         restore_opts={
             "resolution": args.resolution,
@@ -400,6 +395,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"discard cuts producing a scene shorter than N frames (default {DEFAULT_MIN_SCENE_LEN})")
     s.add_argument("--no_content_box", action="store_true",
                    help="skip pillar/letterbox detection and score the full frame")
+    s.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                   help=f"processes to scan with (default {DEFAULT_WORKERS}). OpenCV barely "
+                        "threads this work, so the cores are used by splitting the video into "
+                        "frame ranges. Raise it on a large CPU; returns flatten past about 12")
     s.add_argument("--show_scenes", type=int, default=20, help="how many scenes to print")
     s.add_argument("--quiet", action="store_true")
     s.set_defaults(func=cmd_scan)
@@ -443,6 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan_group.add_argument("--scene_threshold", type=float, default=DEFAULT_SCENE_THRESHOLD)
     scan_group.add_argument("--min_scene_len", type=int, default=DEFAULT_MIN_SCENE_LEN)
     scan_group.add_argument("--no_content_box", action="store_true")
+    scan_group.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                            help=f"processes to scan with (default {DEFAULT_WORKERS})")
     _add_select_args(run)
     _add_restore_args(run)
     sheet_group = run.add_argument_group("sheet")

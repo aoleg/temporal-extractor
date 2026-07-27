@@ -107,7 +107,7 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
         log(f"scan: decoding {video.name} ...")
         meta = scan_video(video, **(scan_opts or {}))
         _atomic_json(write_scan, meta, scan_path)
-        log(f"scan: {meta['video']['frame_count']} frames, {len(meta['scenes'])} scenes, "
+        log(f"scan: {meta['video']['frame_count']:,} frames, {len(meta['scenes'])} scenes, "
             f"{meta['scan']['elapsed_s']:.1f}s")
 
     # --- stage 2 -------------------------------------------------------------

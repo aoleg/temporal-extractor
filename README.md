@@ -110,6 +110,7 @@ extract.bat run video.mp4 --per_scene_max 3          fewer from long takes
 extract.bat run video.mp4 --resolution 1440          bigger output
 extract.bat run video.mp4 --window 9                 more temporal context
 extract.bat run video.mp4 --out D:\dataset\clip01    choose the output folder
+extract.bat run video.mp4 --workers 12               faster scan on a big CPU
 ```
 
 There is no global "give me N stills" setting. Each scene earns stills in
@@ -136,9 +137,12 @@ extract.bat restore path\to\window\ --resolution 1440
 extract.bat sheet stills\ --selection video.select.json
 ```
 
-Stage 1 is seconds and CPU-only. Stage 2 is instant and reads only the scan, so
-it is cheap to re-run while tuning. Stage 3 is the expensive one — roughly 9–14
-seconds per still at 1080p on an RTX 5090, with the model loaded once and reused.
+Stage 1 is CPU-only and runs across several processes — about 23 seconds for
+three minutes of 1080p at the default 4 workers, with a progress bar and ETA.
+Raise `--workers` if you have the cores. Stage 2 is instant and reads only the
+scan, so it is cheap to re-run while tuning. Stage 3 is the expensive one —
+roughly 9–14 seconds per still at 1080p on an RTX 5090, with the model loaded
+once and reused.
 
 ## Full command reference
 

@@ -79,18 +79,37 @@ Exit code 1 if anything is wrong. Cheap insurance before a long job.
 The whole pipeline.
 
 ```
-extract.bat run <video> [--out DIR] [--force] [stage options...]
+usage: temporal_extractor run [-h] [--out OUT] [--force] [--scene_threshold SCENE_THRESHOLD]
+                              [--min_scene_len MIN_SCENE_LEN] [--no_content_box] [--workers WORKERS]
+                              [--window WINDOW] [--seconds_per_still SECONDS_PER_STILL]
+                              [--per_scene_max PER_SCENE_MAX] [--hash_distance HASH_DISTANCE]
+                              [--min_gap SECONDS] [--gap_fraction GAP_FRACTION]
+                              [--min_sharpness_frac MIN_SHARPNESS_FRAC] [--min_luma MIN_LUMA]
+                              [--resolution RESOLUTION] [--seed SEED] [--seeds SEEDS]
+                              [--cfg_scale CFG_SCALE] [--input_noise_scale INPUT_NOISE_SCALE]
+                              [--latent_noise_scale LATENT_NOISE_SCALE]
+                              [--color_correction {lab,wavelet,wavelet_adaptive,hsv,adain,none}]
+                              [--attention_mode {sdpa,flash_attn_2,flash_attn_3,sageattn_2,sageattn_3}]
+                              [--vae_encode_tiled] [--no_decode_tiling] [--blocks_to_swap BLOCKS_TO_SWAP]
+                              [--quiet] [--columns COLUMNS] [--thumb_width THUMB_WIDTH] [--quality QUALITY]
+                              video
 ```
+
+`run` accepts almost every option from the individual stages — all of `scan`'s
+and `select`'s knobs, all the generation and memory knobs from `restore`, and the
+sheet's layout options. Each behaves exactly as documented in its own section
+below.
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--out DIR` | folder beside the video, named after it | output directory |
 | `--force` | off | redo everything, ignoring existing scan, selection and stills |
 
-Accepts every option from `scan`, `select`, `restore` and `sheet` below, except
-those that only make sense for a single stage (`--show_scenes`, `--title`,
-`--crop_pillarbox`, the per-stage `--out` paths). Cropping to the content box is
-automatic in `run` — the scan already measured it.
+The few that are not forwarded only make sense for a single stage:
+`--show_scenes` and `--title` (display only), the per-stage `--out`, `--manifest`
+and `--selection` paths (the run layout defines them), and `--crop_pillarbox` —
+cropping to the content box is automatic in `run`, since the scan already
+measured it.
 
 ### Output layout
 
@@ -130,6 +149,7 @@ extract.bat scan <video> [--out scan.json]
 | `--scene_threshold N` | `27.0` | HSV content delta counting as a cut. Lower = more scenes |
 | `--min_scene_len N` | `15` | discard cuts producing a scene shorter than N frames |
 | `--no_content_box` | off | skip pillar/letterbox detection, score the full frame |
+| `--workers N` | `4` | processes to scan with |
 | `--show_scenes N` | `20` | how many scenes to print |
 | `--quiet` | off | no progress output |
 
@@ -138,7 +158,53 @@ On typical footage the metric is strongly bimodal — real cuts score 45+, ordin
 motion under 10 — so anything in the 10–45 range gives the same answer, and the
 default sits in the middle of that gap.
 
-Cost is decode-bound: roughly 6s for 1500 frames at 480p, 25s at 1080p.
+### Speed and `--workers`
+
+Decoding is not the bottleneck — decode alone runs at 368 fps on 1080p, while
+the stage once managed 53.5. The cost was our own per-frame arithmetic, and
+OpenCV threads it barely at all (1.25× from 1 to 24 threads), so the cores are
+used by splitting the video into frame ranges across processes.
+
+Measured on 4816 frames of 1920×1080:
+
+| workers | time | speedup |
+|---|---|---|
+| 1 | 47.6s | 1.00× |
+| 2 | 36.6s | 1.30× |
+| **4** (default) | **23.1s** | **2.06×** |
+| 8 | 17.4s | 2.73× |
+| 12 | 16.5s | 2.88× |
+
+Against the original implementation the same scan went from 90.1s to 23.1s —
+**3.9× end to end** at the default. The default of 4 assumes an ordinary
+machine; raise it if you have the cores. Returns flatten past about 12, and 24
+was slower than 12 through decode contention, so there is little point going
+higher. Short videos fall back to a single process automatically, and the value
+is clamped to your CPU count.
+
+Chunked output is verified **bit-identical** to a serial scan — frame indices,
+sharpness, scene deltas across every chunk boundary, and every dHash. Each worker
+decodes one frame of lead-in before its range so the scene delta at a boundary is
+computed against its true predecessor; without that, every boundary would report
+a delta of zero and a cut landing there would be missed.
+
+The content-box pre-pass is a separate, unparallelised cost — about 3.7s for 61
+sampled seeks — because the box must be known before any frame can be scored.
+
+### Progress
+
+A bar reports percent, frames, throughput and time remaining, refreshed on a
+time interval rather than a frame count so its cost is constant at any speed:
+
+```
+  scanning  [###############-------------]  56%  2,704/4,816  243 fps  eta 0:08
+```
+
+It degrades in two situations. Container frame counts are hints and are regularly
+wrong, so if the count is missing or the scan passes it, the bar stops quoting a
+percentage and becomes a spinner with a running frame count rather than claiming
+104%. And when output is redirected rather than going to a terminal, it switches
+from `\r` rewriting to sparse newline updates so logs stay readable.
 
 **Output** — per frame: index, timestamp, sharpness, scene delta, mean luma,
 dHash, scene id. Per scene: bounds, frame count, sharpest member, mean sharpness.
