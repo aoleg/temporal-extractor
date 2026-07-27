@@ -1,18 +1,26 @@
 """
 Configuration: paths, model names and generation defaults.
 
-Everything that varies by machine comes from the `.env` file in the project
-root. Exactly one variable is required -- SEEDVR2_REPO -- because every other
-path can be derived from it for a standard SeedVR2 layout. Each derived path can
-still be overridden explicitly when your layout differs.
+Everything machine-specific comes from the `.env` file in the project root.
+
+Three paths are REQUIRED and none of them is guessed. The SeedVR2 checkout, the
+interpreter that has torch, and the folder holding the checkpoints are three
+independent locations: nothing about installing SeedVR2 implies they sit near
+each other, so deriving any of them from another would only produce confident
+wrong answers.
+
+Checkpoint filenames are optional and default to the names the SeedVR2 release
+commonly ships. They are only a convenience -- quantisation variants (fp16, fp8,
+int8, nvfp4, whatever a later release adds) all carry different names, and files
+get renamed in practice, so set them explicitly whenever yours differ.
 
 Precedence, highest first:
     1. real environment variables
     2. .env in the project root
-    3. derived defaults
+    3. the checkpoint-name defaults below (paths have no defaults)
 
 Real environment variables win so CI and one-off overrides work without editing
-a tracked-adjacent file.
+a file.
 """
 
 import os
@@ -21,6 +29,17 @@ from pathlib import Path
 # .../temporal_extractor/temporal_extractor/config.py -> project root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
+
+# Required path settings, with the explanation shown when one is missing.
+REQUIRED_PATHS = {
+    "SEEDVR2_REPO": "your SeedVR2 checkout (the folder containing src/ and configs_7b/)",
+    "SEEDVR2_PYTHON": "the python.exe of the virtualenv that has torch installed",
+    "MODEL_DIR": "the folder holding the DiT checkpoint and the VAE",
+}
+
+# Names from the common SeedVR2 release. Convenience only -- see module docstring.
+DEFAULT_DIT_MODEL = "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors"
+DEFAULT_VAE_MODEL = "ema_vae_fp16.safetensors"
 
 
 def _load_env_file(path: Path) -> dict:
@@ -53,62 +72,59 @@ def setting(name: str, default=None):
     return os.environ.get(name) or _ENV.get(name) or default
 
 
-class ConfigError(RuntimeError):
-    """Something required is missing or points nowhere."""
+def _path(name: str):
+    """A required path setting: Path if set, None if not. Never guessed."""
+    value = setting(name)
+    return Path(value) if value else None
 
 
-def _require_repo() -> Path:
-    value = setting("SEEDVR2_REPO")
-    if not value:
-        raise ConfigError(
-            f"SEEDVR2_REPO is not set.\n"
-            f"Edit {ENV_FILE} and point it at your SeedVR2 checkout, e.g.\n"
-            f"    SEEDVR2_REPO=D:\\models\\ComfyUI-SeedVR2_VideoUpscaler\n"
-            f"Run install.bat if that file does not exist yet."
-        )
-    return Path(value)
+SEEDVR2_REPO = _path("SEEDVR2_REPO")
+# NOT this process's interpreter: the tool runs with no torch, the worker with a
+# pinned torch/CUDA stack. Keeping them apart is the point of the split.
+SEEDVR2_PYTHON = _path("SEEDVR2_PYTHON")
+MODEL_DIR = _path("MODEL_DIR")
+
+DIT_MODEL = setting("DIT_MODEL", DEFAULT_DIT_MODEL)
+VAE_MODEL = setting("VAE_MODEL", DEFAULT_VAE_MODEL)
 
 
-SEEDVR2_REPO = _require_repo() if setting("SEEDVR2_REPO") else None
-
-# Derived defaults assume the common layout, where the SeedVR2 checkout, its
-# virtualenv and the model folder are siblings under one root:
-#
-#     <root>/refs/seedvr2      <- SEEDVR2_REPO
-#     <root>/.venv-seedvr2     <- the interpreter that has torch
-#     <root>/models/seedvr2    <- the checkpoints
-#
-# Set the variables explicitly in .env if yours is arranged differently.
-_ROOT = SEEDVR2_REPO.parent.parent if SEEDVR2_REPO else PROJECT_ROOT
-
-# The restorer's interpreter. Deliberately NOT this process's interpreter: the
-# tool runs with no torch, the worker with a pinned torch/CUDA stack. Keeping
-# them apart is the point of the subprocess split.
-SEEDVR2_PYTHON = Path(setting("SEEDVR2_PYTHON",
-                              _ROOT / ".venv-seedvr2" / "Scripts" / "python.exe"))
-MODEL_DIR = Path(setting("MODEL_DIR", _ROOT / "models" / "seedvr2"))
-
-DIT_MODEL = setting("DIT_MODEL", "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors")
-VAE_MODEL = setting("VAE_MODEL", "ema_vae_fp16.safetensors")
+def _describe_available(model_dir: Path) -> str:
+    """List what is actually in the model folder, to make a name mismatch obvious."""
+    try:
+        found = sorted(p.name for p in model_dir.iterdir()
+                       if p.suffix.lower() in {".safetensors", ".gguf", ".pth"})
+    except OSError:
+        return ""
+    if not found:
+        return "        (no .safetensors/.gguf/.pth files found there)"
+    return "        available: " + "\n                   ".join(found)
 
 
 def check() -> list[str]:
-    """Return a list of human-readable configuration problems; empty means fine."""
+    """Return human-readable configuration problems; an empty list means fine."""
     problems = []
-    if SEEDVR2_REPO is None:
-        problems.append("SEEDVR2_REPO is not set (see .env)")
-    elif not (SEEDVR2_REPO / "src").is_dir():
+
+    for name, description in REQUIRED_PATHS.items():
+        if globals()[name] is None:
+            problems.append(f"{name} is not set -- {description}")
+
+    if SEEDVR2_REPO is not None and not (SEEDVR2_REPO / "src").is_dir():
         problems.append(f"SEEDVR2_REPO does not look like a SeedVR2 checkout: {SEEDVR2_REPO} "
                         "(expected a 'src' directory inside)")
-    if not SEEDVR2_PYTHON.exists():
+    if SEEDVR2_PYTHON is not None and not SEEDVR2_PYTHON.exists():
         problems.append(f"SEEDVR2_PYTHON not found: {SEEDVR2_PYTHON} "
                         "(the interpreter that has torch installed)")
-    if not MODEL_DIR.is_dir():
-        problems.append(f"MODEL_DIR not found: {MODEL_DIR}")
-    else:
-        for name in (DIT_MODEL, VAE_MODEL):
-            if not (MODEL_DIR / name).exists():
-                problems.append(f"model file missing: {MODEL_DIR / name}")
+
+    if MODEL_DIR is not None:
+        if not MODEL_DIR.is_dir():
+            problems.append(f"MODEL_DIR not found: {MODEL_DIR}")
+        else:
+            for variable, name in (("DIT_MODEL", DIT_MODEL), ("VAE_MODEL", VAE_MODEL)):
+                if not (MODEL_DIR / name).exists():
+                    problems.append(
+                        f"{variable} '{name}' is not in {MODEL_DIR}.\n"
+                        f"        Set {variable} in .env to the filename you actually have.\n"
+                        + _describe_available(MODEL_DIR))
     return problems
 
 

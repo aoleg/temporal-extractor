@@ -56,19 +56,32 @@ install.bat
 ```
 
 Creates a virtualenv in `.venv`, installs numpy and OpenCV, and writes a `.env`
-from the template. Then open `.env` and set the one required variable:
+from the template. Then open `.env` and fill in three paths:
 
 ```
 SEEDVR2_REPO=D:\path\to\ComfyUI-SeedVR2_VideoUpscaler
+SEEDVR2_PYTHON=E:\envs\seedvr2\Scripts\python.exe
+MODEL_DIR=F:\checkpoints\seedvr2
 ```
 
-Everything else is derived from it for a standard layout. Check your setup:
+All three are required and none is guessed from the others — they are
+independent locations, and installing SeedVR2 says nothing about where you keep
+its virtualenv or its checkpoints.
+
+Checkpoint **filenames** are optional and default to the names the common SeedVR2
+release ships. Set `DIT_MODEL` / `VAE_MODEL` whenever yours differ, which is
+often: quantisation variants (fp16, fp8, int8, nvfp4, and whatever comes next)
+all have different filenames, and files get renamed in practice.
+
+Then check your setup:
 
 ```
 extract.bat doctor
 ```
 
-which validates every path and starts the restore worker to confirm it loads.
+It validates every path, lists what it actually finds in `MODEL_DIR` if a
+checkpoint name does not match, and starts the restore worker to confirm it
+loads.
 
 ## Use
 

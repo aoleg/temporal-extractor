@@ -46,9 +46,13 @@ echo.
 echo ------------------------------------------------------------
 echo Setup complete.
 echo.
-echo NEXT STEP: open .env and set SEEDVR2_REPO to your SeedVR2
-echo checkout. The restorer also needs its own separate virtualenv
-echo with torch installed -- see README.md.
+echo NEXT STEP: open .env and fill in the three required paths:
+echo   SEEDVR2_REPO    your SeedVR2 checkout
+echo   SEEDVR2_PYTHON  python.exe of the venv that has torch
+echo   MODEL_DIR       folder holding the checkpoints
+echo.
+echo If your checkpoint filenames differ from the SeedVR2
+echo defaults, set DIT_MODEL / VAE_MODEL too. See README.md.
 echo.
 echo Then check everything is wired up:
 echo     extract.bat doctor

@@ -17,25 +17,46 @@ can be inspected, tuned and swept on its own.
 
 ## Configuration
 
-All machine-specific paths live in `.env` in the project root. Exactly one
-variable is required.
+All machine-specific settings live in `.env` in the project root.
 
-| Variable | Required | Default |
+| Variable | Required | Meaning |
 |---|---|---|
-| `SEEDVR2_REPO` | **yes** | — |
-| `SEEDVR2_PYTHON` | no | `<root>/.venv-seedvr2/Scripts/python.exe` |
-| `MODEL_DIR` | no | `<root>/models/seedvr2` |
-| `DIT_MODEL` | no | `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors` |
-| `VAE_MODEL` | no | `ema_vae_fp16.safetensors` |
+| `SEEDVR2_REPO` | **yes** | your SeedVR2 checkout — the folder containing `src/` and `configs_7b/` |
+| `SEEDVR2_PYTHON` | **yes** | the `python.exe` of the virtualenv that has torch |
+| `MODEL_DIR` | **yes** | the folder holding the DiT checkpoint and the VAE |
+| `DIT_MODEL` | no | DiT checkpoint filename |
+| `VAE_MODEL` | no | VAE checkpoint filename |
 
-`<root>` is two levels above `SEEDVR2_REPO`, matching the usual layout where the
-checkout, its virtualenv and the model folder are siblings. Set the optional
-variables explicitly if yours differs. Real environment variables override
-`.env`.
+The three paths are **required and never guessed**. They are three independent
+locations, and nothing about installing SeedVR2 implies they sit near each other
+— deriving one from another would only produce confident wrong answers.
 
 `SEEDVR2_PYTHON` is **not** the tool's own interpreter. The tool runs without
 torch on purpose; the restorer runs in a separate virtualenv so its dependency
 pins cannot constrain the tool.
+
+The two checkpoint names are optional and default to the filenames the common
+SeedVR2 release ships:
+
+```
+DIT_MODEL=seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors
+VAE_MODEL=ema_vae_fp16.safetensors
+```
+
+Set them whenever yours differ, which is often. Quantisation variants — fp16,
+fp8, int8, nvfp4, and whatever later releases add — all carry different
+filenames, and files get renamed in practice. If a named checkpoint is not
+present, `doctor` lists what it actually found in `MODEL_DIR`:
+
+```
+PROBLEMS:
+  - DIT_MODEL 'seedvr2_ema_7b_nvfp4.safetensors' is not in D:\models\seedvr2.
+        Set DIT_MODEL in .env to the filename you actually have.
+        available: ema_vae_fp16.safetensors
+                   seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors
+```
+
+Real environment variables override `.env`.
 
 ---
 

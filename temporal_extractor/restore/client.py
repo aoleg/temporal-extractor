@@ -48,8 +48,11 @@ class SeedVR2Restorer:
                  attention_mode=None, encode_tiled=None, decode_tiled=None,
                  tile=None, tile_overlap=None, blocks_to_swap=None,
                  startup_timeout=180.0, quiet=False, log=None):
-        self.python = Path(python or cfg.SEEDVR2_PYTHON)
-        self.model_dir = Path(model_dir or cfg.MODEL_DIR)
+        # Left unresolved until start(): these are required settings with no
+        # defaults, so they may legitimately be None here, and start() reports
+        # every configuration problem at once rather than dying on the first.
+        self.python = Path(python) if python else cfg.SEEDVR2_PYTHON
+        self.model_dir = Path(model_dir) if model_dir else cfg.MODEL_DIR
         self.dit_model = dit_model or cfg.DIT_MODEL
         self.vae_model = vae_model or cfg.VAE_MODEL
         w = cfg.WORKER_DEFAULTS

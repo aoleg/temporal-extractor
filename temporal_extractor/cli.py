@@ -261,11 +261,14 @@ def cmd_doctor(args) -> int:
     """Check the configuration before a long run discovers it is broken."""
     print(f"config file: {cfg.ENV_FILE}"
           f"{'' if cfg.ENV_FILE.exists() else '   (MISSING -- run install.bat)'}")
-    print(f"  SEEDVR2_REPO   {cfg.SEEDVR2_REPO}")
-    print(f"  SEEDVR2_PYTHON {cfg.SEEDVR2_PYTHON}")
-    print(f"  MODEL_DIR      {cfg.MODEL_DIR}")
-    print(f"  DIT_MODEL      {cfg.DIT_MODEL}")
-    print(f"  VAE_MODEL      {cfg.VAE_MODEL}")
+    shown = lambda v: v if v is not None else "(not set)"
+    print(f"  SEEDVR2_REPO   {shown(cfg.SEEDVR2_REPO)}")
+    print(f"  SEEDVR2_PYTHON {shown(cfg.SEEDVR2_PYTHON)}")
+    print(f"  MODEL_DIR      {shown(cfg.MODEL_DIR)}")
+    print(f"  DIT_MODEL      {cfg.DIT_MODEL}"
+          f"{'' if cfg.setting('DIT_MODEL') else '   (default)'}")
+    print(f"  VAE_MODEL      {cfg.VAE_MODEL}"
+          f"{'' if cfg.setting('VAE_MODEL') else '   (default)'}")
     print()
 
     problems = cfg.check()
