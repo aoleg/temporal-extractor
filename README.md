@@ -22,7 +22,7 @@ Only `restore/worker.py` imports torch.
 ## Stages
 
 1. **scan** — decode, score every frame, detect scene boundaries, write metadata. CPU only. **built**
-2. **select** — pick the best N frames, deduped and spread across scenes. *(not built yet)*
+2. **select** — pick the best N frames, deduped and spread across scenes. **built**
 3. **restore** — decode `[i-k .. i+k]`, run SeedVR2 on the whole window, keep the centre. **built**
 4. **sheet** — contact sheet + manifest. *(not built yet)*
 
@@ -71,6 +71,52 @@ noise**. The same film scored a peak of 470 at 480p and 53 at 1080p. Use it to
 rank frames within one video at one resolution; never threshold on an absolute
 value, and never rank a generation sweep by it — at `cfg_scale` 3.0 it reports
 the *noisiest* output as the sharpest.
+
+## Stage 2: select
+
+```
+..\.venv\Scripts\python.exe -m temporal_extractor.cli select <scan.json> [--count 15]
+```
+
+Reads the scan and writes a selection JSON. Never touches the video, so it runs
+instantly and is cheap to re-run while tuning.
+
+Four constraints are applied together, because sharpness alone picks twenty
+views of the same shot:
+
+- **window fits the scene** — a pick is only eligible if `[i-k .. i+k]` lies
+  inside one scene. Blending frames across a cut is meaningless, so stage 3 must
+  never be handed a window that straddles one.
+- **spread** — picks are allocated across scenes in proportion to eligible
+  length (largest remainder, every scene guaranteed at least one), then each
+  scene is split into that many equal time segments and the sharpest acceptable
+  frame is taken from each.
+- **dedupe** — a candidate is rejected if its dHash is within `--hash_distance`
+  (default 16) of any pick already made, anywhere in the video.
+- **minimum gap** — no two picks closer than `--min_gap` seconds (default 1.0).
+
+The last two are not redundant, and neither is the segmentation. Each was added
+because the previous arrangement measurably failed on the sample footage:
+
+- Ranking a whole scene by sharpness put **six of seven picks inside one 5-second
+  span** of a 35-second take. Small movements in a close-up flip enough dHash
+  bits to clear the distance floor, so dedupe alone did not stop it. Hence
+  segmentation.
+- When dedupe starved a segment, filling the shortfall by sharpness dropped the
+  replacement **right beside an existing pick**, undoing the spread. The fill is
+  therefore *maximin*: take the candidate furthest in time from everything
+  already chosen, ties broken by sharpness. `filled_globally` in the output
+  reports how many picks came from it — a high number means the footage has less
+  variety than `--count` assumes.
+- Two adjacent segments can still both choose a frame near their shared
+  boundary, which put two picks 1 second apart. `--min_gap` is the backstop.
+
+Cross-check: two encodes of the same film at 480p and 1080p, scanned and
+selected independently, agree on **14 of 15** picks to within one second.
+
+The stage will return fewer than `--count` rather than pad with near-duplicates,
+and says which knob to loosen. Asking a 60-second clip for 40 stills yielded 24 —
+that is the honest answer, not a failure.
 
 ## Stage 3: restore
 

@@ -19,8 +19,18 @@ from .restore import SeedVR2Restorer
 from .scan import (
     DEFAULT_MIN_SCENE_LEN,
     DEFAULT_SCENE_THRESHOLD,
+    read_scan,
     scan_video,
     write_scan,
+)
+from .select import (
+    DEFAULT_COUNT,
+    DEFAULT_HASH_DISTANCE,
+    DEFAULT_MIN_GAP_S,
+    DEFAULT_WINDOW,
+    hamming,
+    select_frames,
+    write_selection,
 )
 
 
@@ -77,6 +87,54 @@ def cmd_scan(args) -> int:
         print(f"  ... {len(scenes) - args.show_scenes} more")
 
     print(f"scanned in {meta['scan']['elapsed_s']:.1f}s -> {out}")
+    return 0
+
+
+def cmd_select(args) -> int:
+    meta = read_scan(args.scan)
+    sel = select_frames(
+        meta,
+        count=args.count,
+        window=args.window,
+        hash_distance=args.hash_distance,
+        min_gap_s=args.min_gap,
+        max_per_scene=args.max_per_scene,
+    )
+
+    out = Path(args.out) if args.out else Path(args.scan).with_suffix("").with_suffix(".select.json")
+    write_selection(sel, out)
+
+    s = sel["select"]
+    print(f"{sel['video']['filename']}: {s['selected']}/{s['requested']} picks "
+          f"from {s['eligible_frames']} eligible frames "
+          f"(window {s['window']}, min dHash distance {s['hash_distance']}, "
+          f"min gap {s['min_gap_s']}s = {s['min_gap_frames']} frames)")
+    if s["filled_globally"]:
+        print(f"{s['filled_globally']} pick(s) came from the maximin fill "
+              "-- dedupe starved that many segments")
+    if s["scenes_too_short"]:
+        print(f"scenes too short to host a {s['window']}-frame window: {s['scenes_too_short']}")
+    print(f"scene quota: {s['scene_quota']}")
+    print()
+    print(f"  {'frame':>7} {'time':>9} {'scene':>6} {'sharpness':>10}  window")
+    for p in sel["picks"]:
+        print(f"  {p['frame']:>7} {p['t']:>8.2f}s {p['scene']:>6} {p['sharpness']:>10.1f}  "
+              f"[{p['window'][0]}..{p['window'][1]}]")
+
+    # The closest pair is the honest measure of how varied the set is; if it sits
+    # at the threshold, the limit is binding and worth raising or lowering.
+    if len(sel["picks"]) > 1:
+        pairs = [(hamming(a["dhash"], b["dhash"]), a["frame"], b["frame"])
+                 for i, a in enumerate(sel["picks"]) for b in sel["picks"][i + 1:]]
+        d, fa, fb = min(pairs)
+        print(f"\nclosest pair: f{fa} and f{fb} at dHash distance {d} "
+              f"(floor {s['hash_distance']})")
+    if s["selected"] < s["requested"]:
+        print(f"\nshort by {s['requested'] - s['selected']}: nothing else cleared both filters. "
+              f"Lower --hash_distance (now {s['hash_distance']}) to allow more similar picks, "
+              f"or --min_gap (now {s['min_gap_s']}s) to allow closer ones. "
+              "If neither helps, the footage genuinely has fewer distinct moments than requested.")
+    print(f"\n-> {out}")
     return 0
 
 
@@ -145,6 +203,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--show_scenes", type=int, default=20, help="how many scenes to print")
     s.add_argument("--quiet", action="store_true")
     s.set_defaults(func=cmd_scan)
+
+    sel = sub.add_parser("select", help="stage 2: pick the best N frames from a scan")
+    sel.add_argument("scan", help="scan JSON from stage 1")
+    sel.add_argument("--out", default=None, help="selection JSON (default: <video>.select.json)")
+    sel.add_argument("--count", type=int, default=DEFAULT_COUNT, help=f"stills to aim for (default {DEFAULT_COUNT})")
+    sel.add_argument("--window", type=int, default=DEFAULT_WINDOW,
+                     help=f"restore window size, 4n+1 (default {DEFAULT_WINDOW}). Picks are kept "
+                          "far enough from a cut that the window stays inside one scene")
+    sel.add_argument("--hash_distance", type=int, default=DEFAULT_HASH_DISTANCE,
+                     help=f"minimum dHash Hamming distance between picks (default {DEFAULT_HASH_DISTANCE}). "
+                          "Higher = more varied but fewer picks")
+    sel.add_argument("--min_gap", type=float, default=DEFAULT_MIN_GAP_S, metavar="SECONDS",
+                     help=f"minimum time between any two picks (default {DEFAULT_MIN_GAP_S}s). "
+                          "Backstop for two adjacent segments choosing frames either side of "
+                          "their shared boundary; 0 disables")
+    sel.add_argument("--max_per_scene", type=int, default=None,
+                     help="cap picks from any one scene, so a long take cannot dominate")
+    sel.set_defaults(func=cmd_select)
 
     r = sub.add_parser("restore", help="stage 3: restore a window, keep the centre frame")
     r.add_argument("png_dir", help="folder of PNGs forming one window")
