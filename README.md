@@ -70,7 +70,7 @@ Have both an original and an upscale of the same footage? Feed it the original.
 
 - Windows, recent Python on `PATH`
 - NVIDIA GPU - comfortable at 1080p on 12 GB, 1440p with long windows wants ~20 GB
-- SeedVR2 checkout, its model files, a separate virtualenv with torch for it
+- SeedVR2 checkout, its model files, a separate virtualenv with torch for it. Pull it from here: https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler, and the models from here https://huggingface.co/numz/SeedVR2_comfyUI 
 
 ## Install
 
@@ -125,6 +125,8 @@ extract.bat run video.mp4 --resolution 1440          bigger output
 extract.bat run video.mp4 --window 9                 more temporal context
 extract.bat run video.mp4 --out D:\dataset\clip01    choose the output folder
 extract.bat run video.mp4 --workers 12               faster scan on a big CPU
+extract.bat run movie.mkv --segment 1:15:36 1:20:00 --segment 25:10 27:00
+                                                      only scan these ranges, not the whole movie
 ```
 
 No global "give me N stills" setting. Each scene earns stills in proportion to its length. Forty scenes, forty scenes' worth of stills.

@@ -80,8 +80,9 @@ The whole pipeline.
 
 ```
 usage: temporal_extractor run [-h] [--out OUT] [--force] [--scene_threshold SCENE_THRESHOLD]
-                              [--min_scene_len MIN_SCENE_LEN] [--no_content_box] [--workers WORKERS]
-                              [--window WINDOW] [--seconds_per_still SECONDS_PER_STILL]
+                              [--min_scene_len MIN_SCENE_LEN] [--no_content_box]
+                              [--workers WORKERS] [--segment FROM TO] [--window WINDOW]
+                              [--seconds_per_still SECONDS_PER_STILL]
                               [--per_scene_max PER_SCENE_MAX] [--hash_distance HASH_DISTANCE]
                               [--min_gap SECONDS] [--gap_fraction GAP_FRACTION]
                               [--min_sharpness_frac MIN_SHARPNESS_FRAC] [--min_luma MIN_LUMA]
@@ -90,8 +91,9 @@ usage: temporal_extractor run [-h] [--out OUT] [--force] [--scene_threshold SCEN
                               [--latent_noise_scale LATENT_NOISE_SCALE]
                               [--color_correction {lab,wavelet,wavelet_adaptive,hsv,adain,none}]
                               [--attention_mode {sdpa,flash_attn_2,flash_attn_3,sageattn_2,sageattn_3}]
-                              [--vae_encode_tiled] [--no_decode_tiling] [--blocks_to_swap BLOCKS_TO_SWAP]
-                              [--quiet] [--columns COLUMNS] [--thumb_width THUMB_WIDTH] [--quality QUALITY]
+                              [--vae_encode_tiled] [--no_decode_tiling]
+                              [--blocks_to_swap BLOCKS_TO_SWAP] [--quiet] [--columns COLUMNS]
+                              [--thumb_width THUMB_WIDTH] [--quality QUALITY]
                               video
 ```
 
@@ -150,6 +152,7 @@ extract.bat scan <video> [--out scan.json]
 | `--min_scene_len N` | `15` | discard cuts producing a scene shorter than N frames |
 | `--no_content_box` | off | skip pillar/letterbox detection, score the full frame |
 | `--workers N` | `4` | processes to scan with |
+| `--segment FROM TO` | none (whole video) | only scan this time range; repeatable |
 | `--show_scenes N` | `20` | how many scenes to print |
 | `--quiet` | off | no progress output |
 
@@ -157,6 +160,34 @@ extract.bat scan <video> [--out scan.json]
 On typical footage the metric is strongly bimodal — real cuts score 45+, ordinary
 motion under 10 — so anything in the 10–45 range gives the same answer, and the
 default sits in the middle of that gap.
+
+### `--segment` — scan only part of the video
+
+For a feature-length source where only a handful of scenes are usable for LoRA
+training, scanning the full runtime to keep three of them is wasted decode.
+`--segment FROM TO` restricts the scan (and everything downstream — select,
+restore, sheet all just work with whatever the scan produced) to one or more
+explicit time ranges, given as a closed interval `[FROM, TO]`:
+
+```
+extract.bat scan movie.mkv --segment 1:15:36 1:20:00 --segment 25:10 27:00
+```
+
+Repeat `--segment` for multiple ranges; each accepts `H:MM:SS[.sss]`,
+`MM:SS[.sss]` or bare `SS[.sss]` (`36` means 36 seconds, same as `00:00:36`).
+Omitting `--segment` entirely scans the whole video, exactly as before this
+option existed.
+
+Each segment gets its own independent set of scenes — a scene never spans a
+segment boundary, because the frames on either side are not adjacent in the
+source and a restore window blending across that gap would be meaningless.
+Frame numbers and timestamps in the output (`scene.start_i`/`end_i`,
+`frame.i`/`t`, pick windows) are the real numbers from the source video, so a
+pick can still be traced back and decoded correctly by later stages. Overlapping
+or adjacent segments are merged automatically. A segment reaching past the
+video's actual end is not an error by itself — only a segment that decodes zero
+frames is, since the container's declared length is a hint and is regularly
+wrong.
 
 ### Speed and `--workers`
 

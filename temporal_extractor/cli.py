@@ -23,6 +23,7 @@ from .scan import (
     scan_video,
     write_scan,
 )
+from .timecode import format_timestamp, parse_timestamp
 from .pipeline import run_pipeline
 from .select import (
     DEFAULT_GAP_FRACTION,
@@ -71,6 +72,10 @@ def cmd_scan(args) -> int:
     v, box, scenes = meta["video"], meta["content_box"], meta["scenes"]
     print(f"{v['filename']}: {v['width']}x{v['height']} @ {v['fps']:.3f}fps, "
           f"{v['frame_count']} frames, {v['duration_s']:.1f}s")
+    segs = meta["scan"]["segments"]
+    if segs:
+        print(f"segments: {len(segs)} requested, " + ", ".join(
+            f"{format_timestamp(s['start_t'])}-{format_timestamp(s['end_t'])}" for s in segs))
     if (box["w"], box["h"]) != (v["width"], v["height"]):
         print(f"content box: {box['w']}x{box['h']} at ({box['x']},{box['y']}) "
               f"-- {100 * (1 - box['w'] * box['h'] / (v['width'] * v['height'])):.0f}% of the frame is matte")
@@ -80,7 +85,7 @@ def cmd_scan(args) -> int:
           f"min length {meta['scan']['min_scene_len']} frames)")
 
     for scene in scenes[:args.show_scenes]:
-        print(f"  scene {scene['id']:>3}  frames {scene['start']:>6}-{scene['end']:<6} "
+        print(f"  scene {scene['id']:>3}  frames {scene['start_i']:>6}-{scene['end_i']:<6} "
               f"{scene['start_t']:>8.2f}s-{scene['end_t']:<8.2f}s  "
               f"n={scene['frame_count']:<5} best={scene['best_frame']:<6} "
               f"sharp={scene['best_sharpness']:.1f} (mean {scene['mean_sharpness']:.1f})")
@@ -98,6 +103,7 @@ def scan_kwargs(args) -> dict:
         "min_scene_len": args.min_scene_len,
         "detect_content_box": not args.no_content_box,
         "workers": args.workers,
+        "segments": args.segment,
     }
 
 
@@ -321,6 +327,20 @@ def cmd_run(args) -> int:
     return 0
 
 
+def _add_segment_arg(p) -> None:
+    """`--segment FROM TO`, shared verbatim by `scan` and `run`.
+
+    Repeatable, so a feature-length source can name just the handful of scenes
+    worth scanning instead of paying for a full decode pass to keep three of
+    them. FROM/TO accept H:MM:SS[.sss], MM:SS[.sss] or bare SS[.sss].
+    """
+    p.add_argument("--segment", nargs=2, action="append", type=parse_timestamp,
+                   metavar=("FROM", "TO"), default=None,
+                   help="only scan this time range, e.g. --segment 1:15:36 1:20:00 "
+                        "(repeat for multiple segments). Accepts H:MM:SS[.sss], "
+                        "MM:SS[.sss] or SS[.sss]. Omit entirely to scan the whole video")
+
+
 def _add_select_args(p) -> None:
     """Selection knobs, shared verbatim by `select` and `run`."""
     g = p.add_argument_group("selection")
@@ -399,6 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"processes to scan with (default {DEFAULT_WORKERS}). OpenCV barely "
                         "threads this work, so the cores are used by splitting the video into "
                         "frame ranges. Raise it on a large CPU; returns flatten past about 12")
+    _add_segment_arg(s)
     s.add_argument("--show_scenes", type=int, default=20, help="how many scenes to print")
     s.add_argument("--quiet", action="store_true")
     s.set_defaults(func=cmd_scan)
@@ -444,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_group.add_argument("--no_content_box", action="store_true")
     scan_group.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                             help=f"processes to scan with (default {DEFAULT_WORKERS})")
+    _add_segment_arg(scan_group)
     _add_select_args(run)
     _add_restore_args(run)
     sheet_group = run.add_argument_group("sheet")
