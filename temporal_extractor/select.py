@@ -20,9 +20,11 @@ lie inside a single scene, because blending frames across a cut is meaningless.
 import json
 from pathlib import Path
 
+# 3: added highlight-clipping rejection (max_highlight_frac), symmetric to
+#    min_luma.
 # 2: per-scene allocation with no global ceiling; weak-frame rejection;
 #    scene-adaptive minimum gap.
-SELECT_VERSION = 2
+SELECT_VERSION = 3
 
 DEFAULT_WINDOW = 5
 
@@ -60,6 +62,16 @@ DEFAULT_MIN_GAP_S = 0.4
 # alone across videos. A dim scene shot on a long lens has its own scale.
 DEFAULT_MIN_SHARPNESS_FRAC = 0.35
 DEFAULT_MIN_LUMA = 24.0
+
+# min_luma's counterpart at the bright end: reject a frame if more than this
+# fraction of it is blown-out highlight (see scan.py's HIGHLIGHT_LEVEL).
+# Deliberately NOT a mean-luma ceiling -- measured on real footage, a frame
+# with a genuinely overexposed backdrop and a frame with an intact, merely
+# bright one had almost the same mean luma (one was not even the brighter of
+# the two), while the clipped-pixel fraction separated them cleanly (~40% vs
+# ~0%). Mean brightness does not carry this signal; the clipped-pixel count
+# does. 0.20 sits well clear of both sides of that measured gap.
+DEFAULT_MAX_HIGHLIGHT_FRAC = 0.20
 
 
 def hamming(a: str, b: str) -> int:
@@ -102,7 +114,8 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
                   min_gap_s: float = DEFAULT_MIN_GAP_S,
                   gap_fraction: float = DEFAULT_GAP_FRACTION,
                   min_sharpness_frac: float = DEFAULT_MIN_SHARPNESS_FRAC,
-                  min_luma: float = DEFAULT_MIN_LUMA) -> dict:
+                  min_luma: float = DEFAULT_MIN_LUMA,
+                  max_highlight_frac: float = DEFAULT_MAX_HIGHLIGHT_FRAC) -> dict:
     """
     Pick frames to restore. Returns a select-metadata dict.
 
@@ -116,6 +129,7 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
     gap_fraction:        gap floor as a fraction of a scene's natural spacing
     min_sharpness_frac:  reject frames below this fraction of their scene's best
     min_luma:            reject frames dimmer than this mean luminance
+    max_highlight_frac:  reject frames with more than this fraction blown out
     """
     if window < 5 or window % 4 != 1:
         raise ValueError(f"window must be 4n+1 and at least 5, got {window}")
@@ -123,6 +137,12 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
         raise ValueError(
             "this scan predates per-frame luma, so near-black frames cannot be "
             "rejected; re-run the scan stage, or pass min_luma=0"
+        )
+    if meta.get("scan_version", 1) < 4 and max_highlight_frac > 0:
+        raise ValueError(
+            "this scan predates per-frame highlight_frac, so blown-highlight "
+            "frames cannot be rejected; re-run the scan stage, or pass "
+            "max_highlight_frac=0"
         )
 
     fps = meta["video"]["fps"]
@@ -136,7 +156,7 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
     # is worth restoring at all. Kept in frame order: the selection below slices
     # these ranges by time.
     eligible = {}
-    rejected = {"too_dark": 0, "too_soft": 0}
+    rejected = {"too_dark": 0, "too_soft": 0, "blown_highlights": 0}
     for scene in meta["scenes"]:
         lo, hi = scene["start"] + half, scene["end"] - half
         pool = [frames[i] for i in range(lo, hi + 1)] if hi >= lo else []
@@ -146,6 +166,8 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
         for f in pool:
             if min_luma > 0 and f.get("luma", 255) < min_luma:
                 rejected["too_dark"] += 1
+            elif max_highlight_frac > 0 and f.get("highlight_frac", 0.0) > max_highlight_frac:
+                rejected["blown_highlights"] += 1
             elif f["sharpness"] < floor:
                 rejected["too_soft"] += 1
             else:
@@ -268,6 +290,7 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
             "scene_gap_frames": {str(k): v for k, v in sorted(scene_gap.items())},
             "min_sharpness_frac": min_sharpness_frac,
             "min_luma": min_luma,
+            "max_highlight_frac": max_highlight_frac,
             "rejected_weak": rejected,
             "scene_quota": {str(k): v for k, v in sorted(quota.items())},
             "scenes_unusable": skipped,

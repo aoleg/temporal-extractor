@@ -7,6 +7,7 @@ stage 3 needs actual pixels, so the scan pays for one decode pass and answers:
 
   - how sharp is each frame (variance of Laplacian)
   - how bright is it (to reject fades and unlit shots later)
+  - how much of it is blown-out highlight (to reject overexposed frames later)
   - where are the scene cuts
   - which frames are near-duplicates of each other (dHash, compared in stage 2)
   - what is the real picture area (content box, excluding pillar/letterboxing)
@@ -61,10 +62,11 @@ import numpy as np
 from .frames import content_box_from_projection
 from .progress import ProgressBar
 
+# 4: added per-frame highlight_frac.
 # 3: cheaper equivalent metrics (CV_32F sharpness, dHash and scene delta from
 #    the small working image), so values differ slightly from v2 scans.
 # 2: added per-frame luma.
-SCAN_VERSION = 3
+SCAN_VERSION = 4
 
 # Scene score at or above this is treated as a cut. Same scale as PySceneDetect's
 # ContentDetector default.
@@ -74,6 +76,15 @@ DEFAULT_SCENE_THRESHOLD = 27.0
 # closer together than ~half a second are usually flicker, and a scene shorter
 # than a restore window is useless to us anyway.
 DEFAULT_MIN_SCENE_LEN = 15
+
+# A pixel at or above this (8-bit) is counted as blown-highlight for
+# highlight_frac. Picked from measurement, not guessed: a frame with a
+# genuinely overexposed backdrop showed ~40% of its pixels at or above this
+# level, while other frames in the same source at similar or higher MEAN luma
+# -- but with an intact, non-clipped background -- showed close to 0%. Mean
+# luma alone cannot make this distinction (the overexposed frame's mean was
+# not the highest in its scene); the fraction of near-ceiling pixels can.
+HIGHLIGHT_LEVEL = 230
 
 # The scene metric is a whole-frame average, so detail beyond a couple hundred
 # pixels wide contributes nothing but time.
@@ -137,6 +148,10 @@ def _measure(frame, box, work_size, prev_hsv):
     # including them would scale every score alike and waste the work.
     sharpness = float(cv2.Laplacian(gray, cv2.CV_32F).var())
     luma = float(gray.mean())
+    # Fraction of the frame that is blown out, as opposed to merely bright --
+    # see HIGHLIGHT_LEVEL. Reused verbatim (not recomputed) on the full-res
+    # gray already built for sharpness.
+    highlight_frac = float((gray >= HIGHLIGHT_LEVEL).mean())
 
     small = cv2.resize(picture, work_size, interpolation=cv2.INTER_LINEAR)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
@@ -146,6 +161,7 @@ def _measure(frame, box, work_size, prev_hsv):
     return {
         "sharpness": round(sharpness, 4),
         "luma": round(luma, 2),
+        "highlight_frac": round(highlight_frac, 4),
         "delta": round(delta, 4),
         "dhash": dhash_bits(gray_small),
     }, hsv

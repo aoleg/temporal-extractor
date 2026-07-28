@@ -86,8 +86,9 @@ usage: temporal_extractor run [-h] [--out OUT] [--force] [--scene_threshold SCEN
                               [--per_scene_max PER_SCENE_MAX] [--hash_distance HASH_DISTANCE]
                               [--min_gap SECONDS] [--gap_fraction GAP_FRACTION]
                               [--min_sharpness_frac MIN_SHARPNESS_FRAC] [--min_luma MIN_LUMA]
-                              [--resolution RESOLUTION] [--seed SEED] [--seeds SEEDS]
-                              [--cfg_scale CFG_SCALE] [--input_noise_scale INPUT_NOISE_SCALE]
+                              [--max_highlight_frac MAX_HIGHLIGHT_FRAC] [--resolution RESOLUTION]
+                              [--seed SEED] [--seeds SEEDS] [--cfg_scale CFG_SCALE]
+                              [--input_noise_scale INPUT_NOISE_SCALE]
                               [--latent_noise_scale LATENT_NOISE_SCALE]
                               [--color_correction {lab,wavelet,wavelet_adaptive,hsv,adain,none}]
                               [--attention_mode {sdpa,flash_attn_2,flash_attn_3,sageattn_2,sageattn_3}]
@@ -238,7 +239,8 @@ percentage and becomes a spinner with a running frame count rather than claiming
 from `\r` rewriting to sparse newline updates so logs stay readable.
 
 **Output** — per frame: index, timestamp, sharpness, scene delta, mean luma,
-dHash, scene id. Per scene: bounds, frame count, sharpest member, mean sharpness.
+highlight fraction (share of the frame that is blown-out near-white), dHash,
+scene id. Per scene: bounds, frame count, sharpest member, mean sharpness.
 Plus the video properties and content box.
 
 ---
@@ -263,6 +265,7 @@ extract.bat select <scan.json> [--out select.json]
 | `--gap_fraction F` | `0.2` | gap floor as a fraction of a scene's natural spacing |
 | `--min_sharpness_frac F` | `0.35` | reject frames below this fraction of their own scene's best |
 | `--min_luma N` | `24.0` | reject frames dimmer than this mean luminance; 0 disables |
+| `--max_highlight_frac F` | `0.20` | reject frames with more than this fraction blown out; 0 disables |
 
 ### How many stills you get
 
@@ -283,9 +286,17 @@ To get more stills, lower `--seconds_per_still` or raise `--per_scene_max`.
 
 - **window fits the scene** — a pick is eligible only if `[i-k .. i+k]` lies
   inside one scene. Blending across a cut is meaningless.
-- **weak-frame rejection** — frames dimmer than `--min_luma`, or softer than
-  `--min_sharpness_frac` of **their own scene's** best, are dropped. Judged per
-  scene, never absolutely: a dim scene on a long lens has its own scale.
+- **weak-frame rejection** — frames dimmer than `--min_luma`, blown out beyond
+  `--max_highlight_frac`, or softer than `--min_sharpness_frac` of **their own
+  scene's** best, are dropped. Sharpness is judged per scene, never absolutely:
+  a dim scene on a long lens has its own scale.
+- **`--max_highlight_frac`** judges exposure by the *fraction of clipped
+  pixels*, not mean brightness — measured on real footage, a frame with a
+  genuinely overexposed backdrop and a frame with an intact, merely bright one
+  had almost the same mean luma (the overexposed one was not even the
+  brighter of the two), while the clipped-pixel fraction separated them
+  cleanly (~40% vs ~0%). A `--min_luma`-style mean ceiling would have missed
+  this or misfired on legitimately bright shots.
 - **spread** — each scene is divided into as many equal *time* segments as it has
   picks; the sharpest surviving frame in each is taken.
 - **dedupe** — `--hash_distance`, deliberately loose. Two frames a second apart

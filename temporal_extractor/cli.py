@@ -28,6 +28,7 @@ from .pipeline import run_pipeline
 from .select import (
     DEFAULT_GAP_FRACTION,
     DEFAULT_HASH_DISTANCE,
+    DEFAULT_MAX_HIGHLIGHT_FRAC,
     DEFAULT_MIN_GAP_S,
     DEFAULT_MIN_LUMA,
     DEFAULT_MIN_SHARPNESS_FRAC,
@@ -118,6 +119,7 @@ def select_kwargs(args) -> dict:
         "gap_fraction": args.gap_fraction,
         "min_sharpness_frac": args.min_sharpness_frac,
         "min_luma": args.min_luma,
+        "max_highlight_frac": args.max_highlight_frac,
     }
 
 
@@ -128,10 +130,12 @@ def print_selection(sel: dict, picks: bool = False) -> None:
           f"(window {s['window']}, one still per {s['seconds_per_still']}s of scene, "
           f"max {s['per_scene_max']} per scene)")
     weak = s["rejected_weak"]
-    if weak["too_dark"] or weak["too_soft"]:
+    if weak["too_dark"] or weak["too_soft"] or weak["blown_highlights"]:
         print(f"rejected as unusable: {weak['too_soft']} too soft "
               f"(< {s['min_sharpness_frac']:.0%} of their scene's best), "
-              f"{weak['too_dark']} too dark (luma < {s['min_luma']})")
+              f"{weak['too_dark']} too dark (luma < {s['min_luma']}), "
+              f"{weak['blown_highlights']} blown highlights "
+              f"(> {s['max_highlight_frac']:.0%} clipped)")
     if s["scenes_unusable"]:
         print(f"scenes with no usable frame: {s['scenes_unusable']}")
     if s["filled"]:
@@ -368,6 +372,11 @@ def _add_select_args(p) -> None:
     g.add_argument("--min_luma", type=float, default=DEFAULT_MIN_LUMA,
                    help=f"reject frames dimmer than this mean luminance (default {DEFAULT_MIN_LUMA}); "
                         "0 disables")
+    g.add_argument("--max_highlight_frac", type=float, default=DEFAULT_MAX_HIGHLIGHT_FRAC,
+                   help=f"reject frames with more than this fraction blown out to near-white "
+                        f"(default {DEFAULT_MAX_HIGHLIGHT_FRAC}); 0 disables. Judged by clipped-pixel "
+                        "fraction, not mean brightness -- a bright but intact frame and an "
+                        "overexposed one can share the same mean luma")
 
 
 def _add_restore_args(p) -> None:
