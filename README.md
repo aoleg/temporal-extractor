@@ -1,53 +1,76 @@
-# temporal_extractor
+# Temporal Extractor
 
-An automated tool for extracting high-quality stills from video, for use as
-**LoRA training data**.
+Pulls high-quality stills out of low-quality video, for LoRA training data. Each still is reconstructed from a window of neighbouring frames, not a single frame - so it carries detail no single frame in the source has.
 
-The stills come out at higher quality and higher resolution than the source video
-provides. That is possible because each still is reconstructed from a **window of
-neighbouring frames** rather than from a single frame: detail that is destroyed
-in any one frame by compression, noise or motion often survives in its
-neighbours, and a multi-frame restoration model can recover it. This is
-essentially the same temporal restoration technique behind many commercial
-upscales.
+What it does:
 
-The tool also does the tedious part: it watches the whole video, finds the scene
-boundaries, scores every frame, throws away the blurred and the near-black, and
-picks a spread of sharp, genuinely different shots — then hands you a contact
-sheet to choose from.
+- Scans a video, breaks it down into scenes - automatically
+- For each scene, finds the best stills in it - automatically
+- For each still, extracts its neighboring frames, and applies temporal reconstruction to produce a single, sharp, denoised (as much as possible) center frame - again, automatically
+- So it's basically a one-liner, `extract run myvideo.mp4`, that automatically (again - automatically; no other tool exists that does it, and I really looked) outputs a number of still images for you to train on
+- End result: clean, high-resolution, dataset-ready images for training your LoRA
+
+## The problem
+
+`ffmpeg` plus a single-image upscaler doesn't work for this. One frame from a low-bitrate H.264 stream has blocking, smeared motion, destroyed texture. The upscaler has one damaged frame to work from and invents the rest. Train on a hundred such frames and the LoRA learns the upscaler's idea of skin and fabric, not the subject's.
+
+The detail isn't gone, it moved. Compression destroys different information per frame - a hair strand smeared in frame 40 is often intact in frame 38. Recovering it needs several frames at once, not one.
+
+Second problem: a three-minute clip is ~4,500 frames. Most are useless - blurred, mid-blink, black on a cut, near-duplicate. Picking fifteen good, distinct ones by hand doesn't happen in practice.
+
+## What I looked for
+
+No single open-source tool does this. Restoration is solved; the rest is glue.
+
+Right architecture class: sliding-window video super-resolution, 2N+1 low-res frames in, one restored centre frame out.
+
+- [EDVR](https://github.com/XPixelGroup/BasicSR) - ships inside BasicSR, unmaintained since 2024, depends on a torchvision module removed in 0.17. Dead end.
+- [Shift-Net](https://github.com/dasongli1/shift-net) - trained for motion blur and Gaussian noise, not compression. Targets PyTorch 1.8.
+- [VRT](https://github.com/JingyunLiang/VRT) - OOMs readily.
+- [Bringing Old Films Back to Life](https://github.com/raywzy/Bringing-Old-Films-Back-to-Life) - scratches and flicker on scanned celluloid. Wrong damage model.
+- [RealBasicVSR](https://github.com/ckkelvinchan/RealBasicVSR) - right degradation pipeline, compact enough for CPU - except mmcv has no prebuilt wheels for Blackwell (sm_120), so it isn't anymore.
+- [SwiftVR](https://github.com/H-oliday/SwiftVR) - well engineered, right API, but a 5B backbone built for throughput (26 FPS at 1080p on a 5090). Don't need throughput. Repo is a month old, under thirty stars.
+
+Also: lucky imaging. Astronomers solved this exact problem in the 1970s. [Siril](https://siril.org/) / AutoStakkert grade every frame, keep the best few percent, align subpixel, stack. Invents nothing. Falls apart the moment the subject moves independently of the camera.
+
+Landed on [SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler): one-step diffusion transformer, needs five frames minimum to use temporal info at all, conservative about preserving structure, mature (quantised variants, standalone CLI). `numz` fork for practical use, [upstream](https://github.com/ByteDance-Seed/SeedVR) for reference.
+
+## The solution
+
+Four stages. Model restores, everything else selects and stays out of its way.
+
+|      |           |                                                              |
+| ---- | --------- | ------------------------------------------------------------ |
+| 1    | `scan`    | decode once, score every frame, find scenes, measure content box |
+| 2    | `select`  | choose which frames to restore                               |
+| 3    | `restore` | run a window through the model, keep the centre frame        |
+| 4    | `sheet`   | contact sheet and manifest                                   |
+
+Restorer runs as a subprocess in its own virtualenv, behind `restore(frames) -> ndarray`. Nothing in the tool's own process imports torch. These models churn and their dependency trees conflict; SeedVR2's pins don't get to decide what the rest of the tool can use. Swap restorers by writing one adapter.
+
+Stage 4 exists because the quality gate can't be automated. Diffusion restorers occasionally produce something sharp, plausible, wrong - no no-reference metric catches that reliably. Ten minutes with the contact sheet does.
+
+## Why the stills come out better
+
+Compression loses different detail per frame; so does motion blur. A five-frame window lets the model align and fuse them - detail in any one frame can end up in the output.
+
+SeedVR2 is generative, not purely fusing. It rebuilds texture from a learned prior, window constraining what it's allowed to build. Some of the output is recovered, some is invented, no marker for which. Still better than single-frame: the window narrows the space of plausible reconstructions, where a single-frame upscaler has one damaged observation and has to guess harder.
 
 ## What it works best on
 
-**Original, non-upscaled sources.** A genuine 480p or 720p transfer, heavily
-compressed, is the ideal input: the temporal information is real, and there is
-plenty of headroom to recover. Measured on a 480p source, a 3× upscale produced
-detail no single-frame method can reach — hair resolving into separate strands,
-irises gaining structure, skin gaining texture rather than the usual plastic
-smear.
+Original, non-upscaled sources. Real 480p/720p, heavily compressed: real temporal information, plenty of headroom.
 
-**Already-upscaled video still works, but the benefit shifts.** If the source has
-already been through an upscaler, the detail the model would recover has largely
-been synthesised or destroyed already, and there is little headroom left. On a
-1080p transfer the same pipeline gained 2.8× sharpness against 7.5× on the 480p
-one. On such material the value is mostly in the *other* half of the tool —
-scene detection, frame scoring and picking the best, most varied shots — rather
-than in enhancing a poor source.
+Already-upscaled video still works, benefit shifts. Detail this tool would recover is mostly already synthesised or destroyed. On a 480p source, 3x produced hair resolving into strands, irises gaining structure, against the usual plastic smear. On a 1080p transfer of the same material, gain was visibly smaller. On that input, value is mostly the other half of the tool - scene detection, scoring, picking a varied set.
 
-If you have both an original and an upscale of the same footage, feed it the
-original.
+Caveat: those numbers are variance-of-Laplacian ratios, not scale-invariant, inflated by upscaling regardless of whether real detail appeared. Direction, not measurement. Proper test: downscale a known 4K source to 480p, run the pipeline, compare against the original at matched resolution with a metric that has ground truth. Haven't done that yet.
+
+Have both an original and an upscale of the same footage? Feed it the original.
 
 ## Requirements
 
-- Windows, a recent Python on `PATH` (no specific version required)
-- An NVIDIA GPU. Comfortable at 1080p on 12 GB; 1440p with long windows wants
-  closer to 20 GB
-- A [SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) checkout,
-  its model files, and **a separate virtualenv with torch installed** for it
-
-That last point is deliberate. The restorer runs as a subprocess in its own
-virtualenv, behind a narrow `restore(frames) -> ndarray` interface, so the
-model's dependency pins cannot dictate what this tool is allowed to use. Nothing
-in the tool's own process imports torch.
+- Windows, recent Python on `PATH`
+- NVIDIA GPU - comfortable at 1080p on 12 GB, 1440p with long windows wants ~20 GB
+- SeedVR2 checkout, its model files, a separate virtualenv with torch for it
 
 ## Install
 
@@ -55,8 +78,7 @@ in the tool's own process imports torch.
 install.bat
 ```
 
-Creates a virtualenv in `.venv`, installs numpy and OpenCV, and writes a `.env`
-from the template. Then open `.env` and fill in three paths:
+Creates `.venv`, installs numpy and OpenCV, writes `.env` from the template. Fill in three paths:
 
 ```
 SEEDVR2_REPO=D:\path\to\ComfyUI-SeedVR2_VideoUpscaler
@@ -64,24 +86,17 @@ SEEDVR2_PYTHON=E:\envs\seedvr2\Scripts\python.exe
 MODEL_DIR=F:\checkpoints\seedvr2
 ```
 
-All three are required and none is guessed from the others — they are
-independent locations, and installing SeedVR2 says nothing about where you keep
-its virtualenv or its checkpoints.
+All three are required.
 
-Checkpoint **filenames** are optional and default to the names the common SeedVR2
-release ships. Set `DIT_MODEL` / `VAE_MODEL` whenever yours differ, which is
-often: quantisation variants (fp16, fp8, int8, nvfp4, and whatever comes next)
-all have different filenames, and files get renamed in practice.
+Checkpoint filenames default to the common SeedVR2 release names. Set `DIT_MODEL` / `VAE_MODEL` when yours differ - quantisation variants (fp16, fp8, int8, nvfp4) all have different filenames, and files get renamed in practice.
 
-Then check your setup:
+Then:
 
 ```
 extract.bat doctor
 ```
 
-It validates every path, lists what it actually finds in `MODEL_DIR` if a
-checkpoint name does not match, and starts the restore worker to confirm it
-loads.
+Validates paths, lists what it finds in `MODEL_DIR` on a name mismatch, starts the restore worker to confirm the model loads.
 
 ## Use
 
@@ -89,7 +104,7 @@ loads.
 extract.bat run myvideo.mp4
 ```
 
-That is the whole thing. Output lands in a folder beside the video:
+Output lands beside the video:
 
 ```
 myvideo/
@@ -99,8 +114,7 @@ myvideo/
   work/              intermediates
 ```
 
-Re-running continues where it left off, so an interrupted job costs nothing to
-resume and a finished one re-runs in under a second.
+Re-running continues where it left off. Interrupted job costs nothing to resume; finished one re-runs in under a second.
 
 ### Common adjustments
 
@@ -113,22 +127,9 @@ extract.bat run video.mp4 --out D:\dataset\clip01    choose the output folder
 extract.bat run video.mp4 --workers 12               faster scan on a big CPU
 ```
 
-There is no global "give me N stills" setting. Each scene earns stills in
-proportion to its own length, so the total is whatever the video's structure
-justifies — a film with forty scenes will not silently drop thirty of them to
-satisfy a number.
+No global "give me N stills" setting. Each scene earns stills in proportion to its length. Forty scenes, forty scenes' worth of stills.
 
-### The individual stages
-
-Each stage runs on its own, which is how the pipeline is meant to be tuned and
-debugged:
-
-| | | |
-|---|---|---|
-| 1 | `scan` | decode once, score every frame, find scenes, measure the content box |
-| 2 | `select` | choose which frames to restore — sharp, spread out, not redundant |
-| 3 | `restore` | run a window through the model, keep the centre frame |
-| 4 | `sheet` | contact sheet and manifest |
+### Running the stages separately
 
 ```
 extract.bat scan video.mp4
@@ -137,32 +138,16 @@ extract.bat restore path\to\window\ --resolution 1440
 extract.bat sheet stills\ --selection video.select.json
 ```
 
-Stage 1 is CPU-only and runs across several processes — about 23 seconds for
-three minutes of 1080p at the default 4 workers, with a progress bar and ETA.
-Raise `--workers` if you have the cores. Stage 2 is instant and reads only the
-scan, so it is cheap to re-run while tuning. Stage 3 is the expensive one —
-roughly 9–14 seconds per still at 1080p on an RTX 5090, with the model loaded
-once and reused.
+Stage 1: CPU-only, multi-process, ~23s for three minutes of 1080p at 4 workers. Stage 2: instant, reads only the scan output. Stage 3: the expensive one, ~9-14s per still at 1080p on an RTX 5090, model loaded once and reused.
 
-## Full command reference
-
-**[docs/docs.md](docs/docs.md)** — every command, every option, the memory and
-tiling guidance, and the measured behaviour behind the defaults.
+Full command reference, memory/tiling guidance, measurements behind the defaults: [docs/docs.md](https://claude.ai/chat/docs/docs.md).
 
 ## Notes worth knowing
 
-**Window sizes** must be 4n+1 (5, 9, 13, …) and at least 5. SeedVR2 is a
-multi-frame model and the VAE downsamples time by 4. There is no single-image
-fallback: without neighbouring frames the tool has no reason to exist.
+Window sizes must be 4n+1 (5, 9, 13...) and at least 5 - SeedVR2's VAE downsamples time by 4. No single-image fallback; without neighbouring frames the tool has no reason to exist.
 
-**Pillar/letterboxing** is detected and cropped automatically. Beyond saving the
-compute, it changes which frames get picked — the bars carry per-frame
-compression noise, so they are not a constant offset.
+Pillarboxing/letterboxing detected and cropped automatically. Changes which frames get picked, too - the bars carry per-frame compression noise, not a constant offset.
 
-**Sharpness scores rank frames within one video at one resolution.** Variance of
-Laplacian is not scale-invariant and rises with invented noise. Don't compare the
-numbers across videos, and don't rank a parameter sweep by them.
+Sharpness scores rank frames within one video at one resolution, nothing more. Variance of Laplacian isn't scale-invariant, rises with invented noise as readily as recovered detail. Don't compare across videos, don't rank a parameter sweep by it.
 
-**`cfg_scale` defaults to 1.0 (off)** and is not clamped. On the one-step
-distilled checkpoint, raising it adds high-frequency speckle rather than detail.
-See [docs/docs.md](docs/docs.md#generation-parameters) for the measurements.
+`cfg_scale` defaults to 1.0 (off), not clamped. On the one-step distilled checkpoint, raising it adds high-frequency speckle, not detail - measurements in [docs/docs.md](https://claude.ai/chat/docs/docs.md#generation-parameters). Common advice for still images says 2.0-3.0 for richer texture; that advice looks written for the multi-step configuration. Anyone reproducing a benefit from raised `cfg_scale` on the distilled checkpoint, I'd like to see it.
