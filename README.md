@@ -153,3 +153,7 @@ Pillarboxing/letterboxing detected and cropped automatically. Changes which fram
 Sharpness scores rank frames within one video at one resolution, nothing more. Variance of Laplacian isn't scale-invariant, rises with invented noise as readily as recovered detail. Don't compare across videos, don't rank a parameter sweep by it.
 
 `cfg_scale` defaults to 1.0 (off), not clamped. On the one-step distilled checkpoint, raising it adds high-frequency speckle, not detail - measurements in [docs/docs.md](https://claude.ai/chat/docs/docs.md#generation-parameters). Common advice for still images says 2.0-3.0 for richer texture; that advice looks written for the multi-step configuration. Anyone reproducing a benefit from raised `cfg_scale` on the distilled checkpoint, I'd like to see it.
+
+## License
+
+[MIT](LICENSE).
