@@ -62,6 +62,8 @@ Original, non-upscaled sources. Real 480p/720p, heavily compressed: real tempora
 
 Already-upscaled video still works, benefit shifts. Detail this tool would recover is mostly already synthesised or destroyed. On a 480p source, 3x produced hair resolving into strands, irises gaining structure, against the usual plastic smear. On a 1080p transfer of the same material, gain was visibly smaller. On that input, value is mostly the other half of the tool - scene detection, scoring, picking a varied set.
 
+It doesn't mean you have to feed it the worst transfer you have. A good studio upscale made with proper temporal restoration techniques or a proper high-resolution digital transfer of the original film will come out better. What I mean is don't feed it with dumb upscales. The kind you are likely to find in abundance on t\*\*\*\*\*t sites.
+
 Caveat: those numbers are variance-of-Laplacian ratios, not scale-invariant, inflated by upscaling regardless of whether real detail appeared. Direction, not measurement. Proper test: downscale a known 4K source to 480p, run the pipeline, compare against the original at matched resolution with a metric that has ground truth. Haven't done that yet.
 
 Have both an original and an upscale of the same footage? Feed it the original.
