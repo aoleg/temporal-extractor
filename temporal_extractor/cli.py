@@ -25,6 +25,7 @@ from .scan import (
 )
 from .timecode import format_timestamp, parse_timestamp
 from .pipeline import run_pipeline
+from .preview import DEFAULT_PREVIEW_COUNT, PREVIEW_WINDOW_S, quick_preview
 from .select import (
     DEFAULT_GAP_FRACTION,
     DEFAULT_HASH_DISTANCE,
@@ -67,6 +68,45 @@ def _find_videos(folder: Path) -> list:
         p for p in folder.iterdir()
         if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
     )
+
+
+# Options that only mean anything to the full scan->select pipeline. Passing any
+# of them alongside --preview says "I have an opinion about how frames are
+# chosen", so the quick path steps aside and the real one runs (still without
+# restoring). Sheet and output options are deliberately absent: --out, --columns
+# and friends apply to a quick preview perfectly well.
+PIPELINE_FLAGS = frozenset({
+    "--interval", "--window", "--seconds_per_still", "--per_scene_max",
+    "--hash_distance", "--min_gap", "--gap_fraction", "--min_sharpness_frac",
+    "--min_luma", "--max_highlight_frac",
+    "--scene_threshold", "--min_scene_len", "--no_content_box", "--workers",
+    "--segment",
+})
+
+
+def _configured(argv) -> set:
+    """Which PIPELINE_FLAGS the user actually typed.
+
+    Read off argv rather than compared against argparse defaults, so that
+    explicitly passing a flag's own default value still counts as configuring
+    it -- `--min_luma 24.0` means the user is thinking about selection, and
+    silently giving them the quick path instead would be a surprise.
+    """
+    return {token.split("=", 1)[0] for token in argv} & PIPELINE_FLAGS
+
+
+def preview_count(text: str) -> int:
+    """`--preview`'s optional count: a positive integer."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a frame count, got {text!r}"
+            + (f" -- if that is your video, put it before --preview"
+               if not text.startswith("-") else ""))
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {text}")
+    return value
 
 
 def _load_window(png_dir: Path, window: int):
@@ -387,9 +427,25 @@ def _run_pipeline_kwargs(args) -> dict:
                     "quality": args.quality},
         seeds=args.seeds,
         force=args.force,
-        preview=args.preview,
+        preview=bool(args.preview),
         upscale_stills=args.upscale_stills,
     )
+
+
+def _quick_preview_wanted(args) -> bool:
+    """Bare `--preview [N]`: no selection or scan option was configured."""
+    return bool(args.preview) and not getattr(args, "configured_flags", set())
+
+
+def _run_one(video: Path, out, args) -> None:
+    """One video, by whichever path the options ask for."""
+    if _quick_preview_wanted(args):
+        quick_preview(video, out, count=args.preview,
+                      sheet_opts={"columns": args.columns,
+                                  "thumb_width": args.thumb_width,
+                                  "quality": args.quality})
+    else:
+        run_pipeline(video, out, **_run_pipeline_kwargs(args))
 
 
 def _run_folder(folder: Path, args) -> int:
@@ -409,7 +465,6 @@ def _run_folder(folder: Path, args) -> int:
         raise SystemExit(f"no videos in {folder} (looked for: {exts})")
 
     print(f"preview: {len(videos)} video(s) in {folder}")
-    kwargs = _run_pipeline_kwargs(args)
     out_root = Path(args.out) if args.out else None
 
     done, failed = [], []
@@ -417,7 +472,7 @@ def _run_folder(folder: Path, args) -> int:
         out = (out_root / video.stem) if out_root else None
         print(f"\n[{i}/{len(videos)}] {video.name}")
         try:
-            run_pipeline(video, out, **kwargs)
+            _run_one(video, out, args)
             done.append(video.name)
         except Exception as exc:
             print(f"  FAILED: {exc}")
@@ -441,7 +496,9 @@ def cmd_run(args) -> int:
             )
         return _run_folder(video, args)
 
-    run_pipeline(args.video, args.out, **_run_pipeline_kwargs(args))
+    if not video.exists():
+        raise SystemExit(f"no such video: {video}")
+    _run_one(video, args.out, args)
     return 0
 
 
@@ -589,11 +646,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--force", action="store_true",
                      help="redo everything, ignoring existing scan, selection and stills")
     mode = run.add_mutually_exclusive_group()
-    mode.add_argument("--preview", action="store_true",
-                      help="capture each pick straight from the video instead of restoring it: "
-                           "no SeedVR2, no GPU, seconds instead of minutes. The output directory "
-                           "is built exactly as usual (work JSONs, stills/, contact sheet, "
-                           "manifest), so the picks can be reviewed before paying for the restore. "
+    mode.add_argument("--preview", nargs="?", type=preview_count,
+                      const=DEFAULT_PREVIEW_COUNT, default=None, metavar="N",
+                      help=f"quick preview: {DEFAULT_PREVIEW_COUNT} frames by default, or N, "
+                           f"spread evenly over the video. Decodes only {PREVIEW_WINDOW_S:g}s at "
+                           "each point and keeps the sharpest frame, so it never scans the whole "
+                           "file; output is a contact sheet in <out>/preview/, and stills/ and "
+                           "work/ are not touched. No SeedVR2 and no GPU. Passing any selection "
+                           "or scan option (--interval, --seconds_per_still, --segment, ...) "
+                           "switches to the full pipeline instead, still without restoring. "
                            "Required if `video` is a folder: every video directly inside it "
                            f"({', '.join(sorted(VIDEO_EXTENSIONS))}) is previewed in turn")
     mode.add_argument("--upscale-stills", dest="upscale_stills", action="store_true",
@@ -619,7 +680,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
+    # `run` needs to know not just the values but whether the user chose them:
+    # bare --preview takes the quick path, --preview with any selection or scan
+    # option takes the full one. See _configured().
+    args.configured_flags = _configured(argv)
     return args.func(args)
 
 

@@ -127,6 +127,17 @@ def _kept_stills(stills_dir: Path, selection: dict, was_restored: dict, seed: in
         log(f"upscale: {len(orphans)} still(s) match no pick in the selection and "
             f"carry no window, so they cannot be restored: "
             f"{orphans[:3]}{' ...' if len(orphans) > 3 else ''}")
+    # The easy mistake: a bare `--preview` writes to preview/, not stills/, so
+    # curating those and coming here finds an empty folder and would otherwise
+    # just shrug. Point at the difference rather than let it look like a no-op.
+    if not todo and not done and not any(stills_dir.glob("*.png")):
+        quick = stills_dir.parent / "preview"
+        if any(quick.glob("*.png")):
+            log(f"upscale: stills/ is empty, but {quick.name}/ has frames in it. "
+                "Those come from a bare --preview, which is only a quick look and "
+                "feeds nothing. Re-run with --preview and a selection option "
+                "(--interval, --seconds_per_still, ...) to fill stills/, curate "
+                "that, then come back here.")
     return todo
 
 

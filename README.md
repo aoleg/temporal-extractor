@@ -26,23 +26,38 @@ Re-running continues where it left off. An interrupted job costs nothing to resu
 
 ### Preview Mode - no SeedVR2 needed
 
-Finds the frames and extracts them straight from the video, bypassing the upscaler entirely. Seconds instead of minutes, no GPU, and **it runs without SeedVR2 installed at all** - so this half of the tool works on a machine that can't run the model.
+Bypasses the upscaler entirely. No GPU, and **it runs without SeedVR2 installed at all** - so this half of the tool works on a machine that can't run the model.
 
-With scene detection (the default): splits the video into scenes and takes the best frames from each, in proportion to how long each scene runs.
+#### Just show me the video
 
 ```
 extract.bat run myvideo.mp4 --preview
 ```
 
-Without scene detection: the sharpest frame of every N seconds, evenly across the whole video, nothing thrown away for being dark or soft. Minimum 0.1s, in steps of 0.1.
+20 frames spread evenly across the whole video, laid out as a contact sheet. It doesn't scan the file: it looks at one second of footage at each of 20 points, keeps the sharpest frame of each second, and stops. Cost depends on the number of frames you asked for, not on how long the video is - a three-hour film takes about as long as a three-minute one. On a 3-minute 1080p clip that's ~8s, against ~37s to do it properly.
+
+Want a different number, say for a long film:
 
 ```
-extract.bat run myvideo.mp4 --interval 2 --preview
+extract.bat run myvideo.mp4 --preview 40
 ```
 
-Either way you get the full output folder - `stills/`, a labelled contact sheet, the manifest. The stills are source frames as they are: soft, noisy, small. Use the sheet to judge *which frames you want*, not how they look.
+Output goes to `myvideo/preview/` - its own folder, separate from `stills/`, cleared and rebuilt every run. It's a preview, not an extraction; nothing here feeds the upscale step.
 
-Point it at a folder instead of a file and it previews every video inside, one after another:
+#### Preview the frames it would actually pick
+
+Add any selection option and you get the real thing - scan, scene detection, the full picking logic - with only the restore skipped:
+
+```
+extract.bat run myvideo.mp4 --preview --seconds_per_still 2    scene-based picks
+extract.bat run myvideo.mp4 --preview --interval 2             sharpest frame every 2s
+```
+
+Now you get the normal output folder - `stills/`, contact sheet, manifest - holding exactly the frames a real run would have restored. This is the mode to use before committing GPU time, and the one the cherry-pick workflow below builds on.
+
+Either way the images are the source frames untouched: soft, noisy, small. Use the sheet to judge *which frames you want*, not how they look.
+
+#### A whole folder at once
 
 ```
 extract.bat run D:\raw_clips --preview
@@ -67,12 +82,14 @@ The real thing. Same selection, but each still is reconstructed from a window of
 The reason Preview Mode exists. Three steps:
 
 ```
-extract.bat run myvideo.mp4 --preview           1. candidates, in seconds
-                                                2. open contact_sheet.jpg and
-                                                   delete the stills you don't
-                                                   want from stills/
-extract.bat run myvideo.mp4 --upscale-stills    3. upscale only the survivors
+extract.bat run myvideo.mp4 --preview --interval 2    1. candidates, in seconds
+                                                      2. open contact_sheet.jpg and
+                                                         delete the stills you don't
+                                                         want from stills/
+extract.bat run myvideo.mp4 --upscale-stills          3. upscale only the survivors
 ```
+
+Step 1 needs a selection option - `--interval`, `--seconds_per_still`, whatever suits the footage. That's what puts real candidate stills in `stills/`. Bare `--preview` is the other thing: a quick look that writes to `preview/` and feeds nothing.
 
 Step 3 restores whatever is left in `stills/` and nothing else. Each one is written as `<name>_upscaled.png` beside its original, which stays put - so you end up with before/after pairs, and the new contact sheet shows them side by side, labelled `source` and `upscaled`.
 

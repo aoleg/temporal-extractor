@@ -79,7 +79,7 @@ Exit code 1 if anything is wrong. Cheap insurance before a long job.
 The whole pipeline.
 
 ```
-usage: temporal_extractor run [-h] [--out OUT] [--force] [--preview | --upscale-stills]
+usage: temporal_extractor run [-h] [--out OUT] [--force] [--preview [N] | --upscale-stills]
                               [--scene_threshold SCENE_THRESHOLD] [--min_scene_len MIN_SCENE_LEN]
                               [--no_content_box] [--workers WORKERS] [--segment FROM TO]
                               [--interval SECONDS] [--window WINDOW]
@@ -108,7 +108,7 @@ below.
 |---|---|---|
 | `--out DIR` | folder beside the video, named after it | output directory |
 | `--force` | off | redo everything, ignoring existing scan, selection and stills |
-| `--preview` | off | capture the picks straight from the video instead of restoring them; required if `video` is a folder |
+| `--preview [N]` | off | quick preview: N frames (default 20) into `<out>/preview/`, no full scan. With any selection or scan option, becomes "run the pipeline but don't restore". Required if `video` is a folder |
 | `--upscale-stills` | off | restore only what is still in `stills/`, writing `<name>_upscaled.png` beside each |
 | `--interval SECONDS` | off | sharpest frame every N seconds, instead of scene-based selection |
 
@@ -139,48 +139,104 @@ finished work.
 The worker only starts when there is restoring left to do, so re-running a
 finished job costs under a second rather than a model load.
 
-### `--preview` — review the picks before paying for them
+### `--preview [N]` — a fast look, two different ways
 
-Restoring is the expensive part: seconds of GPU per still, minutes for a whole
-video. `--preview` replaces stage 3 with a straight capture of each pick's
-centre frame — the same frame the restorer would have been centred on, cropped to
-the same content box, written under the same filename.
+`--preview` has two behaviours, and which one you get depends on whether you
+configured anything else.
+
+**Bare `--preview`, or `--preview N`: the quick path.** No scan, no selection,
+no `work/`, no `stills/`.
 
 ```
-extract.bat run <video> --preview
+extract.bat run <video> --preview        20 frames
+extract.bat run <video> --preview 40     40 frames
 ```
 
-Everything else is produced exactly as usual: `work/scan.json`,
-`work/select.json`, `stills/`, `contact_sheet.jpg` and `manifest.json`. What you
-get is the tool's choice of frames, at source resolution, in seconds instead of
-minutes, and without needing a working SeedVR2 install or a GPU at all. It is the
-fastest way to answer "are these the right frames?" before committing to the
-restore, and to tune the selection knobs against something you can look at.
+It splits the video into N equal slices, decodes **one second** at the centre of
+each, keeps the sharpest frame of that second, and lays the results out. Only
+about `N x fps` frames are ever decoded, so cost is set by N and not by how long
+the video is — a three-hour film costs the same as a three-minute one. Measured
+on a 3.2-minute 1080p sample: 8.5s, against 36.7s for the full-scan path; the gap
+widens with duration, since only the latter grows.
 
-The stills are byte-identical to the source frames, so the contact sheet shows
-the footage as it is — soft, noisy, small. Judge the *choice* of frames on it,
-not their quality.
+The fixed count is the convention every video-contact-sheet tool follows (vcsi
+defaults to a 4x4 grid, HandBrake's scan to 10 previews): one screenful,
+whatever the running time. 20 is the default because the sheet is 5 columns
+wide, so it fills four rows exactly.
 
-The manifest records, per still, whether it was actually restored:
+Output goes in its own directory, and `stills/` and `work/` are never touched:
+
+```
+<out>/preview/
+  <stem>_f000123.png    the frames, cropped to the content box
+  contact_sheet.jpg     the deliverable
+  manifest.json         which frame and timestamp each came from
+```
+
+It is redone from scratch every time and the directory is cleared first — this
+path is cheap enough that caching it would cost more in confusion than it saves
+in seconds. Note the filenames carry no `_s<scene>_` part, so they cannot be
+mistaken for pipeline stills; `--upscale-stills` reads `stills/` and will never
+see them.
+
+Frames are chosen by sharpness within their own second only, using the same
+variance-of-Laplacian measure as the scan. There is no scene detection, no
+dedupe and no weak-frame rejection: a second that is entirely black still
+contributes its best frame. The point is to show you the video, not to judge it.
+
+**`--preview` with any selection or scan option: the full path.** Passing
+`--interval`, `--seconds_per_still`, `--per_scene_max`, `--hash_distance`,
+`--min_gap`, `--gap_fraction`, `--min_sharpness_frac`, `--min_luma`,
+`--max_highlight_frac`, `--window`, `--scene_threshold`, `--min_scene_len`,
+`--no_content_box`, `--workers` or `--segment` means you have an opinion about
+which frames get chosen, so the real pipeline runs — scan, select, the lot —
+and only the restore is skipped:
+
+```
+extract.bat run <video> --preview --interval 2
+extract.bat run <video> --preview --seconds_per_still 2
+```
+
+That produces the usual layout — `work/scan.json`, `work/select.json`,
+`stills/`, `contact_sheet.jpg`, `manifest.json` — with each still captured
+straight from the video instead of restored: the same frame the restorer would
+have been centred on, cropped to the same content box, under the same filename.
+This is the mode `--upscale-stills` is built to follow, and the one to use for
+tuning the selection knobs against something you can look at.
+
+Output options (`--out`, `--columns`, `--thumb_width`, `--quality`) do not
+trigger the switch — they apply to either path.
+
+Either way there is no SeedVR2 and no GPU involved, and the images are
+byte-identical to the source frames. The contact sheet shows the footage as it
+is — soft, noisy, small. Judge the *choice* of frames on it, not their quality.
+
+#### The `restored` record (full path only)
+
+On the full path, previews and real stills share `stills/` and share filenames,
+so the manifest records per still which one it is:
 
 ```json
 { "file": "clip_s000_f000088.png", "frame": 88, "restored": false }
 ```
 
-That record — not the flag you passed — is what later runs trust, because both
-modes write to the same filenames. A restore run that finds un-restored stills in
-its output directory stops with a message rather than quietly overwriting the
-previews you are reviewing; delete them or pass `--force`. A `--preview` run
-over a directory of real stills leaves them alone and keeps them marked restored.
-Manifests written before this field existed read as restored, which is what they
-were.
+That record — not the flag you passed — is what later runs trust. A restore run
+that finds un-restored stills in its output directory stops with a message
+rather than quietly overwriting the previews you are reviewing; delete them or
+pass `--force`. A `--preview` run over a directory of real stills leaves them
+alone and keeps them marked restored. Manifests written before this field
+existed read as restored, which is what they were.
 
-`--seeds` is ignored under `--preview`: decoding a frame is deterministic, so N
-variants would be N identical files.
+None of this applies to the quick path, which is why it has its own directory:
+nothing there shares a name with a pipeline still, so there is nothing to tell
+apart.
 
-Note that re-running `--preview` after deleting previews just captures them
-again — the picks live in `work/select.json`, not in the folder. To act on the
-deletions, use `--upscale-stills`.
+`--seeds` is ignored under `--preview` either way: decoding a frame is
+deterministic, so N variants would be N identical files.
+
+Note that re-running the full `--preview` path after deleting previews just
+captures them again — the picks live in `work/select.json`, not in the folder.
+To act on the deletions, use `--upscale-stills`.
 
 ### Folder input — preview a whole batch at once
 
@@ -193,8 +249,11 @@ extract.bat run D:\raw_clips --preview --interval 2 --out D:\previews
 ```
 
 Every video file directly inside the folder is run in turn, in the same
-`--preview` mode, with the same options applied to each. Subfolders are not
-descended into — a video two levels down is not picked up.
+`--preview` mode, with the same options applied to each — including which of the
+two paths above applies. `run <folder> --preview` gives every video a 20-frame
+quick preview in its own `preview/`; `run <folder> --preview --interval 2` runs
+the full pipeline on each. Subfolders are not descended into — a video two levels
+down is not picked up.
 
 A file counts as a video by extension, matched case-insensitively:
 `.mp4`, `.mkv`, `.mov`, `.avi`, `.webm`, `.wmv`, `.flv`, `.mpg`, `.mpeg`, `.m4v`,
