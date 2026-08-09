@@ -19,10 +19,10 @@ reality, and a run interrupted anywhere picks up where it stopped. Everything is
 written to a temporary name and renamed into place, so a process killed
 mid-write leaves no half-file that would later be mistaken for finished work.
 
-`no_restore` swaps stage 3 for a straight capture of each pick's centre frame:
-same filenames, same sheet, same manifest, no SeedVR2 and no GPU. It exists so
-the picks can be reviewed before paying for the restore. Because the two modes
-write to the same paths, the manifest records per still whether it was actually
+`preview` swaps stage 3 for a straight capture of each pick's centre frame: same
+filenames, same sheet, same manifest, no SeedVR2 and no GPU. It exists so the
+picks can be reviewed before paying for the restore. Because the two modes write
+to the same paths, the manifest records per still whether it was actually
 restored (`"restored"`), and that record -- not the current run's mode -- is what
 later runs trust. Without it a mixed directory would silently claim restored
 stills that are raw grabs, or the reverse.
@@ -73,7 +73,7 @@ def _prior_restored(manifest_path: Path) -> dict:
     """
     Read `{filename: was_it_restored}` back out of an existing manifest.
 
-    A manifest written before `no_restore` existed has no `restored` field and
+    A manifest written before `preview` existed has no `restored` field and
     could only describe restored stills, so a missing field reads as True.
     Anything unreadable reads as "nothing known", which leaves the caller to
     treat what is on disk as restored -- the pre-existing assumption.
@@ -163,7 +163,7 @@ def choose_variants(variants: list[dict]) -> list[dict]:
 
 def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
                  worker_opts=None, sheet_opts=None, scan_opts=None,
-                 seeds=1, force=False, no_restore=False, upscale_stills=False,
+                 seeds=1, force=False, preview=False, upscale_stills=False,
                  log=print) -> dict:
     """Run every stage. Returns the manifest."""
     video = Path(video).resolve()
@@ -214,14 +214,14 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
     # --- stage 3 -------------------------------------------------------------
     box = selection["content_box"]
     stem = video.stem[:32]
-    if no_restore:
+    if preview:
         # A seed only means something to the restorer; N variants of a decoded
         # frame would be N identical files under different names.
         if seeds > 1:
-            log(f"extract: --seeds {seeds} ignored, capture is deterministic")
+            log(f"preview: --seeds {seeds} ignored, capture is deterministic")
         seeds = 1
 
-    stage = "extract" if no_restore else "upscale" if upscale_stills else "restore"
+    stage = "preview" if preview else "upscale" if upscale_stills else "restore"
     todo, stale = [], []
     if upscale_stills:
         todo = _kept_stills(stills_dir, selection, was_restored,
@@ -238,7 +238,7 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
                     # An existing still counts as done only if it was made the
                     # way this run is making them. A raw grab is not a restored
                     # still.
-                    if not no_restore and not was_restored.get(name, True):
+                    if not preview and not was_restored.get(name, True):
                         stale.append(name)
                     continue
                 todo.append((pick, seed, path))
@@ -246,7 +246,7 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
 
     if stale:
         raise SystemExit(
-            f"{len(stale)} still(s) in {stills_dir} were captured with --no_restore "
+            f"{len(stale)} still(s) in {stills_dir} were captured with --preview "
             f"and are not restored (e.g. {stale[0]}).\n"
             "Restoring over them would discard the previews you are reviewing, so "
             "this run stops instead.\n"
@@ -256,8 +256,8 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
     if not todo:
         log(f"{stage}: nothing to do" if upscale_stills
             else f"{stage}: all {total} stills already present, nothing to do")
-    elif no_restore:
-        log(f"extract: {len(todo)} of {total} frames to capture (no restore)")
+    elif preview:
+        log(f"preview: {len(todo)} of {total} frames to capture (no restore)")
         # Decode the pick's whole window and keep its centre, rather than
         # seeking straight to the one frame: identical work to what the restore
         # path does, so the preview is the same image a later restore centres on.
@@ -265,7 +265,7 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
             lo, hi = pick["window"]
             frames = decode_window(str(video), lo, hi, box)
             _atomic_png(path, frames[len(frames) // 2])
-            log(f"extract: [{done}/{len(todo)}] f{pick['frame']} scene {pick['scene']} "
+            log(f"preview: [{done}/{len(todo)}] f{pick['frame']} scene {pick['scene']} "
                 f"-> {path.name}")
     else:
         # Identical work either way: both modes restore a window and write its
@@ -291,7 +291,7 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
 
     # What this run actually produced, so the manifest can tell the truth about
     # a directory that has been through both modes.
-    was_restored.update({path.name: not no_restore for _, _, path in todo})
+    was_restored.update({path.name: not preview for _, _, path in todo})
 
     # --- stage 4 -------------------------------------------------------------
     entries = collect_stills(stills_dir, selection)

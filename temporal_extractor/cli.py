@@ -369,7 +369,7 @@ def cmd_run(args) -> int:
                     "quality": args.quality},
         seeds=args.seeds,
         force=args.force,
-        no_restore=args.no_restore,
+        preview=args.preview,
         upscale_stills=args.upscale_stills,
     )
     return 0
@@ -519,14 +519,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--force", action="store_true",
                      help="redo everything, ignoring existing scan, selection and stills")
     mode = run.add_mutually_exclusive_group()
-    mode.add_argument("--no_restore", action="store_true",
+    mode.add_argument("--preview", action="store_true",
                       help="capture each pick straight from the video instead of restoring it: "
                            "no SeedVR2, no GPU, seconds instead of minutes. The output directory "
                            "is built exactly as usual (work JSONs, stills/, contact sheet, "
                            "manifest), so the picks can be reviewed before paying for the restore")
     mode.add_argument("--upscale-stills", dest="upscale_stills", action="store_true",
                       help="restore whatever is still in stills/, and nothing else. The other "
-                           "half of --no_restore: preview, delete the ones you do not want, "
+                           "half of --preview: preview, delete the ones you do not want, "
                            "then run this to restore only the survivors. Each is written as "
                            "<name>_upscaled.png beside the original, which is left in place")
     scan_group = run.add_argument_group("scan")

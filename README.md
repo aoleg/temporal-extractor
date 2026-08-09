@@ -31,13 +31,13 @@ Finds the frames and extracts them straight from the video, bypassing the upscal
 With scene detection (the default): splits the video into scenes and takes the best frames from each, in proportion to how long each scene runs.
 
 ```
-extract.bat run myvideo.mp4 --no_restore
+extract.bat run myvideo.mp4 --preview
 ```
 
 Without scene detection: the sharpest frame of every N seconds, evenly across the whole video, nothing thrown away for being dark or soft. Minimum 0.1s, in steps of 0.1.
 
 ```
-extract.bat run myvideo.mp4 --interval 2 --no_restore
+extract.bat run myvideo.mp4 --interval 2 --preview
 ```
 
 Either way you get the full output folder - `stills/`, a labelled contact sheet, the manifest. The stills are source frames as they are: soft, noisy, small. Use the sheet to judge *which frames you want*, not how they look.
@@ -57,7 +57,7 @@ The real thing. Same selection, but each still is reconstructed from a window of
 The reason Preview Mode exists. Three steps:
 
 ```
-extract.bat run myvideo.mp4 --no_restore        1. candidates, in seconds
+extract.bat run myvideo.mp4 --preview           1. candidates, in seconds
                                                 2. open contact_sheet.jpg and
                                                    delete the stills you don't
                                                    want from stills/

@@ -79,7 +79,7 @@ Exit code 1 if anything is wrong. Cheap insurance before a long job.
 The whole pipeline.
 
 ```
-usage: temporal_extractor run [-h] [--out OUT] [--force] [--no_restore | --upscale-stills]
+usage: temporal_extractor run [-h] [--out OUT] [--force] [--preview | --upscale-stills]
                               [--scene_threshold SCENE_THRESHOLD] [--min_scene_len MIN_SCENE_LEN]
                               [--no_content_box] [--workers WORKERS] [--segment FROM TO]
                               [--interval SECONDS] [--window WINDOW]
@@ -108,7 +108,7 @@ below.
 |---|---|---|
 | `--out DIR` | folder beside the video, named after it | output directory |
 | `--force` | off | redo everything, ignoring existing scan, selection and stills |
-| `--no_restore` | off | capture the picks straight from the video instead of restoring them |
+| `--preview` | off | capture the picks straight from the video instead of restoring them |
 | `--upscale-stills` | off | restore only what is still in `stills/`, writing `<name>_upscaled.png` beside each |
 | `--interval SECONDS` | off | sharpest frame every N seconds, instead of scene-based selection |
 
@@ -139,15 +139,15 @@ finished work.
 The worker only starts when there is restoring left to do, so re-running a
 finished job costs under a second rather than a model load.
 
-### `--no_restore` — review the picks before paying for them
+### `--preview` — review the picks before paying for them
 
 Restoring is the expensive part: seconds of GPU per still, minutes for a whole
-video. `--no_restore` replaces stage 3 with a straight capture of each pick's
+video. `--preview` replaces stage 3 with a straight capture of each pick's
 centre frame — the same frame the restorer would have been centred on, cropped to
 the same content box, written under the same filename.
 
 ```
-extract.bat run <video> --no_restore
+extract.bat run <video> --preview
 ```
 
 Everything else is produced exactly as usual: `work/scan.json`,
@@ -170,24 +170,24 @@ The manifest records, per still, whether it was actually restored:
 That record — not the flag you passed — is what later runs trust, because both
 modes write to the same filenames. A restore run that finds un-restored stills in
 its output directory stops with a message rather than quietly overwriting the
-previews you are reviewing; delete them or pass `--force`. A `--no_restore` run
+previews you are reviewing; delete them or pass `--force`. A `--preview` run
 over a directory of real stills leaves them alone and keeps them marked restored.
 Manifests written before this field existed read as restored, which is what they
 were.
 
-`--seeds` is ignored under `--no_restore`: decoding a frame is deterministic, so N
+`--seeds` is ignored under `--preview`: decoding a frame is deterministic, so N
 variants would be N identical files.
 
-Note that re-running `--no_restore` after deleting previews just captures them
+Note that re-running `--preview` after deleting previews just captures them
 again — the picks live in `work/select.json`, not in the folder. To act on the
 deletions, use `--upscale-stills`.
 
 ### `--upscale-stills` — restore only what you kept
 
-The other half of `--no_restore`, and the reason it exists:
+The other half of `--preview`, and the reason it exists:
 
 ```
-extract.bat run myvideo.mp4 --no_restore     # 1. previews, in seconds
+extract.bat run myvideo.mp4 --preview     # 1. previews, in seconds
                                              # 2. look at contact_sheet.jpg,
                                              #    delete the ones you don't want
 extract.bat run myvideo.mp4 --upscale-stills # 3. restore only the survivors
@@ -216,7 +216,7 @@ without a window there is nothing to restore it from. Deleting *everything* is
 not an error either; the run says there is nothing to lay out and leaves the
 existing sheet and manifest alone rather than overwriting them with emptiness.
 
-`--no_restore` and `--upscale-stills` are mutually exclusive.
+`--preview` and `--upscale-stills` are mutually exclusive.
 
 ---
 
@@ -357,7 +357,7 @@ A second, much simpler mode. `--interval N` takes the sharpest frame from every
 N seconds of video and does nothing else:
 
 ```
-extract.bat run <video> --interval 2 --no_restore
+extract.bat run <video> --interval 2 --preview
 extract.bat select <scan.json> --interval 0.5
 ```
 
@@ -388,7 +388,7 @@ and `window_unsafe` in the selection JSON records the count. A window blending
 across a cut produces a smeared still, so emitting one silently would be worse
 than taking a slightly softer frame.
 
-Interval mode pairs with `--no_restore`: sample the video densely, look at the
+Interval mode pairs with `--preview`: sample the video densely, look at the
 sheet, then restore. Contact-sheet cells stay labelled with frame, timestamp and
 scene as usual, so a pick can always be traced back.
 

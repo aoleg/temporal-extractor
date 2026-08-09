@@ -20,7 +20,7 @@ There is a second, much simpler mode. `interval=N` ignores all of the above and
 takes the sharpest frame from every N seconds of video: no scenes, no quotas, no
 dedupe, no weak-frame rejection, one pick per interval unconditionally. It answers
 a different question -- "show me this video every N seconds, best frame of each" --
-and is meant for eyeballing a dense sample (with `run --no_restore`) and choosing
+and is meant for eyeballing a dense sample (with `run --preview`) and choosing
 by hand, rather than for the tool choosing well on its own.
 """
 
