@@ -51,6 +51,24 @@ from .sheet import (
 )
 
 
+# Extensions --preview will look for when `run`'s video argument is a folder.
+# cv2.VideoCapture will happily attempt to open anything; this list exists only
+# to decide what counts as "a video" for a directory listing, not to validate
+# the file. Matched case-insensitively (.MPG and .mpg both count).
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv",
+    ".mpg", ".mpeg", ".m4v", ".ts", ".m2ts", ".mts", ".3gp",
+}
+
+
+def _find_videos(folder: Path) -> list:
+    """First-level video files in `folder`, by extension, case-insensitive."""
+    return sorted(
+        p for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+
 def _load_window(png_dir: Path, window: int):
     paths = sorted(p for p in png_dir.iterdir()
                    if p.suffix.lower() == ".png" and not p.name.startswith("restored_"))
@@ -344,10 +362,10 @@ def cmd_doctor(args) -> int:
     return 0
 
 
-def cmd_run(args) -> int:
-    run_pipeline(
-        args.video,
-        args.out,
+def _run_pipeline_kwargs(args) -> dict:
+    """Everything run_pipeline() needs except video/out -- identical for every
+    video when --video is a folder, so this is built once and reused."""
+    return dict(
         scan_opts={**scan_kwargs(args), "show_progress": not args.quiet},
         select_opts=select_kwargs(args),
         restore_opts={
@@ -372,6 +390,58 @@ def cmd_run(args) -> int:
         preview=args.preview,
         upscale_stills=args.upscale_stills,
     )
+
+
+def _run_folder(folder: Path, args) -> int:
+    """--preview over every video in a folder, one at a time.
+
+    Each video's own default output layout still applies (a folder beside it,
+    named after it) unless --out is given, in which case each video gets its
+    own subfolder under --out -- sharing one output directory across videos
+    would mean each video's stills, sheet and manifest overwriting the last.
+
+    A video that fails does not stop the rest: one corrupt or unreadable file
+    in a folder of fifty should not cost the other forty-nine.
+    """
+    videos = _find_videos(folder)
+    if not videos:
+        exts = ", ".join(sorted(VIDEO_EXTENSIONS))
+        raise SystemExit(f"no videos in {folder} (looked for: {exts})")
+
+    print(f"preview: {len(videos)} video(s) in {folder}")
+    kwargs = _run_pipeline_kwargs(args)
+    out_root = Path(args.out) if args.out else None
+
+    done, failed = [], []
+    for i, video in enumerate(videos, 1):
+        out = (out_root / video.stem) if out_root else None
+        print(f"\n[{i}/{len(videos)}] {video.name}")
+        try:
+            run_pipeline(video, out, **kwargs)
+            done.append(video.name)
+        except Exception as exc:
+            print(f"  FAILED: {exc}")
+            failed.append(video.name)
+
+    print(f"\npreview: {len(done)} of {len(videos)} video(s) done"
+          + (f", {len(failed)} failed: {', '.join(failed)}" if failed else ""))
+    return 1 if failed else 0
+
+
+def cmd_run(args) -> int:
+    video = Path(args.video)
+    if video.is_dir():
+        if not args.preview:
+            raise SystemExit(
+                f"{video} is a folder, not a video file.\n"
+                "Folder input is only supported with --preview: running every video "
+                "in a folder straight through SeedVR2 would mean committing GPU time "
+                "to all of them before you have looked at any. Pass --preview to "
+                "preview every video in the folder, or point run at one video file."
+            )
+        return _run_folder(video, args)
+
+    run_pipeline(args.video, args.out, **_run_pipeline_kwargs(args))
     return 0
 
 
@@ -513,7 +583,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(func=cmd_restore)
 
     run = sub.add_parser("run", help="all four stages: scan -> select -> restore -> sheet")
-    run.add_argument("video", help="input video file")
+    run.add_argument("video", help="input video file, or (with --preview) a folder of them")
     run.add_argument("--out", default=None,
                      help="output directory (default: a folder beside the video, named after it)")
     run.add_argument("--force", action="store_true",
@@ -523,7 +593,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="capture each pick straight from the video instead of restoring it: "
                            "no SeedVR2, no GPU, seconds instead of minutes. The output directory "
                            "is built exactly as usual (work JSONs, stills/, contact sheet, "
-                           "manifest), so the picks can be reviewed before paying for the restore")
+                           "manifest), so the picks can be reviewed before paying for the restore. "
+                           "Required if `video` is a folder: every video directly inside it "
+                           f"({', '.join(sorted(VIDEO_EXTENSIONS))}) is previewed in turn")
     mode.add_argument("--upscale-stills", dest="upscale_stills", action="store_true",
                       help="restore whatever is still in stills/, and nothing else. The other "
                            "half of --preview: preview, delete the ones you do not want, "

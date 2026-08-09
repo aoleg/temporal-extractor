@@ -108,7 +108,7 @@ below.
 |---|---|---|
 | `--out DIR` | folder beside the video, named after it | output directory |
 | `--force` | off | redo everything, ignoring existing scan, selection and stills |
-| `--preview` | off | capture the picks straight from the video instead of restoring them |
+| `--preview` | off | capture the picks straight from the video instead of restoring them; required if `video` is a folder |
 | `--upscale-stills` | off | restore only what is still in `stills/`, writing `<name>_upscaled.png` beside each |
 | `--interval SECONDS` | off | sharpest frame every N seconds, instead of scene-based selection |
 
@@ -181,6 +181,44 @@ variants would be N identical files.
 Note that re-running `--preview` after deleting previews just captures them
 again — the picks live in `work/select.json`, not in the folder. To act on the
 deletions, use `--upscale-stills`.
+
+### Folder input — preview a whole batch at once
+
+`video` can be a folder instead of a file, but only when `--preview` is also
+given:
+
+```
+extract.bat run D:\raw_clips --preview
+extract.bat run D:\raw_clips --preview --interval 2 --out D:\previews
+```
+
+Every video file directly inside the folder is run in turn, in the same
+`--preview` mode, with the same options applied to each. Subfolders are not
+descended into — a video two levels down is not picked up.
+
+A file counts as a video by extension, matched case-insensitively:
+`.mp4`, `.mkv`, `.mov`, `.avi`, `.webm`, `.wmv`, `.flv`, `.mpg`, `.mpeg`, `.m4v`,
+`.ts`, `.m2ts`, `.mts`, `.3gp`. Anything else in the folder — a `.txt`, a
+`.jpg`, another tool's leftovers — is ignored. This is a directory-listing
+filter, not a validation of the file: a renamed non-video with one of these
+extensions still gets attempted and still fails, reported the same way as any
+other bad file (below).
+
+Each video keeps its own default output layout — a folder beside itself, named
+after it — unless `--out` is given, in which case each video gets its own
+subfolder under `--out` (`D:\previews\clip1\`, `D:\previews\clip2\`, ...).
+Sharing one output directory across videos would mean each video's `stills/`,
+contact sheet and manifest overwriting the last, so this is not optional.
+
+A video that fails to scan or decode does not stop the batch: it is reported
+and skipped, and the rest continue. The run exits non-zero if anything failed,
+with a summary of which videos succeeded and which did not.
+
+**Why folder input is `--preview`-only:** running every video in a folder
+straight through the restorer would mean committing GPU time to all of them
+before anyone has looked at any of them — exactly the mistake `--preview`
+exists to avoid for a single video, at batch scale. Passing a folder without
+`--preview` refuses outright rather than doing that.
 
 ### `--upscale-stills` — restore only what you kept
 

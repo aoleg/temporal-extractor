@@ -42,6 +42,16 @@ extract.bat run myvideo.mp4 --interval 2 --preview
 
 Either way you get the full output folder - `stills/`, a labelled contact sheet, the manifest. The stills are source frames as they are: soft, noisy, small. Use the sheet to judge *which frames you want*, not how they look.
 
+Point it at a folder instead of a file and it previews every video inside, one after another:
+
+```
+extract.bat run D:\raw_clips --preview
+```
+
+Every video directly in `D:\raw_clips` gets its own output folder beside it, matched by extension (`.mp4`, `.mkv`, `.mov`, `.avi`, `.mpg`/`.MPG`, `.mpeg`/`.MPEG`, and a few others - case doesn't matter). Subfolders aren't descended into. One bad file doesn't stop the rest - it's reported and skipped, and the others still run.
+
+**Folder input only works with `--preview`.** Point `run` at a folder without it and the tool refuses rather than guessing: running a whole folder through SeedVR2 unattended would mean spending GPU time on every video before you've looked at any of them, which is the exact mistake `--preview` exists to prevent. Preview the folder, look at the sheets, then restore what you want one video at a time.
+
 ### You'll need SeedVR2 for this
 
 ```
