@@ -26,6 +26,12 @@ write to the same paths, the manifest records per still whether it was actually
 restored (`"restored"`), and that record -- not the current run's mode -- is what
 later runs trust. Without it a mixed directory would silently claim restored
 stills that are raw grabs, or the reverse.
+
+`upscale_stills` is the other half of that workflow: having reviewed the previews
+and deleted the ones they did not want, the user re-runs, and only the files
+still in `stills/` are restored -- each written as `<name>_upscaled.png` beside
+its original. It is the one stage driven by the folder rather than by the
+selection, because the deletions *are* the instruction.
 """
 
 import json
@@ -42,7 +48,10 @@ from .sheet import (
     build_contact_sheet,
     build_manifest,
     collect_stills,
+    is_upscaled,
+    parse_still_name,
     still_name,
+    upscaled_name,
     write_manifest,
     write_sheet,
 )
@@ -75,6 +84,50 @@ def _prior_restored(manifest_path: Path) -> dict:
         return {}
     return {s["file"]: s.get("restored", True)
             for s in data.get("stills", []) if "file" in s}
+
+
+def _kept_stills(stills_dir: Path, selection: dict, was_restored: dict, seed: int,
+                 force: bool, log) -> list:
+    """
+    Work list for --upscale-stills: whatever is still in `stills_dir`.
+
+    This is the one stage driven by the folder rather than by the selection.
+    That inversion is the whole point -- the user curates by deleting, so the
+    files that survive ARE the instruction, and a pick with no file left is a
+    pick that was rejected.
+
+    The selection is still needed, for the window each surviving still was
+    centred on: that is what makes this a temporal restore rather than a
+    single-image upscale, and it cannot be recovered from the PNG.
+    """
+    picks = {p["frame"]: p for p in selection["picks"]}
+    todo, orphans, done = [], [], 0
+    for path in sorted(stills_dir.glob("*.png")):
+        if is_upscaled(path):
+            continue
+        # A still the manifest already calls restored is the real thing; running
+        # it through again would restore a restored image. Unknown files default
+        # to "needs it" -- this mode was asked for explicitly, and silently doing
+        # nothing is a worse answer than doing the work.
+        if was_restored.get(path.name) is True:
+            done += 1
+            continue
+        pick = picks.get(parse_still_name(path).get("frame"))
+        if pick is None:
+            orphans.append(path.name)
+            continue
+        out = upscaled_name(path)
+        if out.exists() and not force:
+            continue
+        todo.append((pick, seed, out))
+
+    if done:
+        log(f"upscale: {done} still(s) already restored, left alone")
+    if orphans:
+        log(f"upscale: {len(orphans)} still(s) match no pick in the selection and "
+            f"carry no window, so they cannot be restored: "
+            f"{orphans[:3]}{' ...' if len(orphans) > 3 else ''}")
+    return todo
 
 
 def decode_window(video: str, lo: int, hi: int, box: dict) -> list:
@@ -110,7 +163,8 @@ def choose_variants(variants: list[dict]) -> list[dict]:
 
 def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
                  worker_opts=None, sheet_opts=None, scan_opts=None,
-                 seeds=1, force=False, no_restore=False, log=print) -> dict:
+                 seeds=1, force=False, no_restore=False, upscale_stills=False,
+                 log=print) -> dict:
     """Run every stage. Returns the manifest."""
     video = Path(video).resolve()
     out_dir = Path(out_dir) if out_dir else video.parent / video.stem
@@ -152,8 +206,10 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
     if selection is None:
         selection = select_frames(meta, **(select_opts or {}))
         _atomic_json(write_selection, selection, select_path)
-    log(f"select: {selection['select']['selected']} picks, "
-        f"quota {selection['select']['scene_quota']}")
+    s = selection["select"]
+    log(f"select: {s['selected']} picks, "
+        + (f"one per {s['interval_s']}s interval" if s.get("mode") == "interval"
+           else f"quota {s['scene_quota']}"))
 
     # --- stage 3 -------------------------------------------------------------
     box = selection["content_box"]
@@ -165,21 +221,28 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
             log(f"extract: --seeds {seeds} ignored, capture is deterministic")
         seeds = 1
 
-    stage = "extract" if no_restore else "restore"
+    stage = "extract" if no_restore else "upscale" if upscale_stills else "restore"
     todo, stale = [], []
-    for pick in selection["picks"]:
-        for seed_index in range(seeds):
-            seed = (restore_opts or {}).get("seed", 42) + seed_index
-            name = still_name(stem, pick["scene"], pick["frame"],
-                              seed=seed if seeds > 1 else None)
-            path = stills_dir / name
-            if path.exists() and not force:
-                # An existing still counts as done only if it was made the way
-                # this run is making them. A raw grab is not a restored still.
-                if not no_restore and not was_restored.get(name, True):
-                    stale.append(name)
-                continue
-            todo.append((pick, seed, path))
+    if upscale_stills:
+        todo = _kept_stills(stills_dir, selection, was_restored,
+                            (restore_opts or {}).get("seed", 42), force, log)
+        total = len(todo)
+    else:
+        for pick in selection["picks"]:
+            for seed_index in range(seeds):
+                seed = (restore_opts or {}).get("seed", 42) + seed_index
+                name = still_name(stem, pick["scene"], pick["frame"],
+                                  seed=seed if seeds > 1 else None)
+                path = stills_dir / name
+                if path.exists() and not force:
+                    # An existing still counts as done only if it was made the
+                    # way this run is making them. A raw grab is not a restored
+                    # still.
+                    if not no_restore and not was_restored.get(name, True):
+                        stale.append(name)
+                    continue
+                todo.append((pick, seed, path))
+        total = len(selection["picks"]) * seeds
 
     if stale:
         raise SystemExit(
@@ -187,11 +250,12 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
             f"and are not restored (e.g. {stale[0]}).\n"
             "Restoring over them would discard the previews you are reviewing, so "
             "this run stops instead.\n"
-            "Delete them, or re-run with --force to redo the whole job.")
+            "Delete the ones you do not want and re-run with --upscale-stills to "
+            "restore only what is left, or pass --force to redo the whole job.")
 
-    total = len(selection["picks"]) * seeds
     if not todo:
-        log(f"{stage}: all {total} stills already present, nothing to do")
+        log(f"{stage}: nothing to do" if upscale_stills
+            else f"{stage}: all {total} stills already present, nothing to do")
     elif no_restore:
         log(f"extract: {len(todo)} of {total} frames to capture (no restore)")
         # Decode the pick's whole window and keep its centre, rather than
@@ -204,13 +268,17 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
             log(f"extract: [{done}/{len(todo)}] f{pick['frame']} scene {pick['scene']} "
                 f"-> {path.name}")
     else:
-        log(f"restore: {len(todo)} of {total} stills to produce")
+        # Identical work either way: both modes restore a window and write its
+        # centre. Only the list differs -- picks for a normal run, surviving
+        # files for --upscale-stills.
+        log(f"{stage}: {len(todo)} of {total} stills to produce" if not upscale_stills
+            else f"upscale: {len(todo)} kept still(s) to restore")
         opts = dict(restore_opts or {})
         opts.pop("seed", None)
         # The worker is only started when there is real work: a fully resumed
         # run should not pay ~10s of model materialisation to discover that.
         with SeedVR2Restorer(**(worker_opts or {})) as restorer:
-            log(f"restore: worker ready ({restorer.info.get('device')})")
+            log(f"{stage}: worker ready ({restorer.info.get('device')})")
             done = 0
             for pick, seed, path in todo:
                 lo, hi = pick["window"]
@@ -218,7 +286,7 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
                 centre = restorer.restore(frames, seed=seed, **opts)
                 _atomic_png(path, centre)
                 done += 1
-                log(f"restore: [{done}/{len(todo)}] f{pick['frame']} scene {pick['scene']} "
+                log(f"{stage}: [{done}/{len(todo)}] f{pick['frame']} scene {pick['scene']} "
                     f"seed {seed} -> {path.name}")
 
     # What this run actually produced, so the manifest can tell the truth about
@@ -227,6 +295,16 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
 
     # --- stage 4 -------------------------------------------------------------
     entries = collect_stills(stills_dir, selection)
+    if not entries:
+        # Reachable since --upscale-stills made stills/ a folder the user edits:
+        # delete everything and there is nothing to lay out. Leave the existing
+        # sheet and manifest alone rather than overwriting them with emptiness --
+        # they still describe what was there, and this run produced nothing to
+        # replace that with.
+        log(f"sheet: no stills in {stills_dir}, nothing to lay out; "
+            "the existing contact sheet and manifest are left as they are")
+        return build_manifest([], selection=selection)
+
     by_pick = {}
     for entry in entries:
         by_pick.setdefault(entry.get("frame"), []).append(entry)
@@ -241,6 +319,12 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
         entry["restored"] = was_restored.get(entry["file"], True)
 
     raw = sum(1 for e in entries if not e["restored"])
+    # After --upscale-stills the sheet holds before/after pairs at the same
+    # frame. Say which is which, but only then -- on a normal sheet every cell
+    # would carry the same word and it would be noise.
+    if raw and raw != len(entries):
+        for entry in entries:
+            entry["variant"] = "upscaled" if entry["restored"] else "source"
     sheet_path = out_dir / "contact_sheet.jpg"
     opts = dict(sheet_opts or {})
     suffix = "   (not restored)" if raw == len(entries) else ""

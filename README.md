@@ -10,6 +10,82 @@ What it does:
 - So it's basically a one-liner, `extract run myvideo.mp4`, that automatically (again - automatically; no other tool exists that does it, and I really looked) outputs a number of still images for you to train on
 - End result: clean, high-resolution, dataset-ready images for training your LoRA
 
+## Quick start
+
+Setup is [Install](#install), below. Every command writes one output folder beside the video:
+
+```
+myvideo/
+  stills/            the deliverable
+  contact_sheet.jpg  for review - open this first
+  manifest.json      which source frames produced each still
+  work/              intermediates
+```
+
+Re-running continues where it left off. An interrupted job costs nothing to resume; a finished one re-runs in under a second.
+
+### Preview Mode - no SeedVR2 needed
+
+Finds the frames and extracts them straight from the video, bypassing the upscaler entirely. Seconds instead of minutes, no GPU, and **it runs without SeedVR2 installed at all** - so this half of the tool works on a machine that can't run the model.
+
+With scene detection (the default): splits the video into scenes and takes the best frames from each, in proportion to how long each scene runs.
+
+```
+extract.bat run myvideo.mp4 --no_restore
+```
+
+Without scene detection: the sharpest frame of every N seconds, evenly across the whole video, nothing thrown away for being dark or soft. Minimum 0.1s, in steps of 0.1.
+
+```
+extract.bat run myvideo.mp4 --interval 2 --no_restore
+```
+
+Either way you get the full output folder - `stills/`, a labelled contact sheet, the manifest. The stills are source frames as they are: soft, noisy, small. Use the sheet to judge *which frames you want*, not how they look.
+
+### You'll need SeedVR2 for this
+
+```
+extract.bat run myvideo.mp4
+```
+
+The real thing. Same selection, but each still is reconstructed from a window of neighbouring frames through SeedVR2 instead of copied out of the video. Minutes rather than seconds, and it needs the model, the GPU and the three paths in `.env`.
+
+`--interval` works here too, and so does every option below.
+
+### Cherry-pick what gets upscaled
+
+The reason Preview Mode exists. Three steps:
+
+```
+extract.bat run myvideo.mp4 --no_restore        1. candidates, in seconds
+                                                2. open contact_sheet.jpg and
+                                                   delete the stills you don't
+                                                   want from stills/
+extract.bat run myvideo.mp4 --upscale-stills    3. upscale only the survivors
+```
+
+Step 3 restores whatever is left in `stills/` and nothing else. Each one is written as `<name>_upscaled.png` beside its original, which stays put - so you end up with before/after pairs, and the new contact sheet shows them side by side, labelled `source` and `upscaled`.
+
+Your deletions are the instruction. Nothing else needs saying: a still you removed is a still that doesn't get upscaled. Re-running is safe - anything already upscaled is skipped, so an interrupted job picks up where it stopped.
+
+### Common adjustments
+
+```
+extract.bat run video.mp4 --interval 0.5             sample every half-second instead of by scene
+extract.bat run video.mp4 --seconds_per_still 2      more stills
+extract.bat run video.mp4 --per_scene_max 3          fewer from long takes
+extract.bat run video.mp4 --resolution 1440          bigger output
+extract.bat run video.mp4 --window 9                 more temporal context
+extract.bat run video.mp4 --out D:\dataset\clip01    choose the output folder
+extract.bat run video.mp4 --workers 12               faster scan on a big CPU
+extract.bat run movie.mkv --segment 1:15:36 1:20:00 --segment 25:10 27:00
+                                                      only scan these ranges, not the whole movie
+```
+
+No global "give me N stills" setting. Each scene earns stills in proportion to its length. Forty scenes, forty scenes' worth of stills. (`--interval` is the exception - there the count is just the video's length divided by the interval.)
+
+Full command reference, memory/tiling guidance, measurements behind the defaults: [docs/docs.md](./docs/docs.md).
+
 ## The problem
 
 `ffmpeg` plus a single-image upscaler doesn't work for this. One frame from a low-bitrate H.264 stream has blocking, smeared motion, destroyed texture. The upscaler has one damaged frame to work from and invents the rest. Train on a hundred such frames and the LoRA learns the upscaler's idea of skin and fabric, not the subject's.
@@ -48,6 +124,8 @@ Four stages. Model restores, everything else selects and stays out of its way.
 
 Restorer runs as a subprocess in its own virtualenv, behind `restore(frames) -> ndarray`. Nothing in the tool's own process imports torch. These models churn and their dependency trees conflict; SeedVR2's pins don't get to decide what the rest of the tool can use. Swap restorers by writing one adapter.
 
+That separation is also why Preview Mode can run with no SeedVR2 at all: stage 3 is the only stage that touches it, and skipping it skips the entire dependency.
+
 Stage 4 exists because the quality gate can't be automated. Diffusion restorers occasionally produce something sharp, plausible, wrong - no no-reference metric catches that reliably. Ten minutes with the contact sheet does.
 
 ## Why the stills come out better
@@ -71,8 +149,9 @@ Have both an original and an upscale of the same footage? Feed it the original.
 ## Requirements
 
 - Windows, recent Python on `PATH`
-- NVIDIA GPU - comfortable at 1080p on 12 GB, 1440p with long windows wants ~20 GB
-- SeedVR2 checkout, its model files, a separate virtualenv with torch for it. Pull it from here: https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler, and the models from here https://huggingface.co/numz/SeedVR2_comfyUI 
+- For Preview Mode, that's it - no GPU, no SeedVR2
+- For restoring: an NVIDIA GPU - comfortable at 1080p on 12 GB, 1440p with long windows wants ~20 GB
+- Plus a SeedVR2 checkout, its model files, and a separate virtualenv with torch for it. Pull it from here: https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler, and the models from here https://huggingface.co/numz/SeedVR2_comfyUI
 
 ## Install
 
@@ -88,7 +167,7 @@ SEEDVR2_PYTHON=E:\envs\seedvr2\Scripts\python.exe
 MODEL_DIR=F:\checkpoints\seedvr2
 ```
 
-All three are required.
+All three are required to restore. Preview Mode never reads them, so you can leave them alone until you have SeedVR2 set up.
 
 Checkpoint filenames default to the common SeedVR2 release names. Set `DIT_MODEL` / `VAE_MODEL` when yours differ - quantisation variants (fp16, fp8, int8, nvfp4) all have different filenames, and files get renamed in practice.
 
@@ -100,48 +179,7 @@ extract.bat doctor
 
 Validates paths, lists what it finds in `MODEL_DIR` on a name mismatch, starts the restore worker to confirm the model loads.
 
-## Use
-
-```
-extract.bat run myvideo.mp4
-```
-
-Output lands beside the video:
-
-```
-myvideo/
-  stills/            the deliverable
-  contact_sheet.jpg  for review
-  manifest.json      which source frames produced each still
-  work/              intermediates
-```
-
-Re-running continues where it left off. Interrupted job costs nothing to resume; finished one re-runs in under a second.
-
-### Check the picks first
-
-```
-extract.bat run myvideo.mp4 --no_restore
-```
-
-Same output folder, same filenames, same contact sheet - but the stills are captured straight from the video instead of restored. No GPU, no SeedVR2, seconds instead of minutes. Look at the sheet, decide whether these are the frames you want, then run again without the flag. Restoring is the expensive part; this is how you avoid spending it on the wrong frames.
-
-### Common adjustments
-
-```
-extract.bat run video.mp4 --seconds_per_still 2      more stills
-extract.bat run video.mp4 --per_scene_max 3          fewer from long takes
-extract.bat run video.mp4 --resolution 1440          bigger output
-extract.bat run video.mp4 --window 9                 more temporal context
-extract.bat run video.mp4 --out D:\dataset\clip01    choose the output folder
-extract.bat run video.mp4 --workers 12               faster scan on a big CPU
-extract.bat run movie.mkv --segment 1:15:36 1:20:00 --segment 25:10 27:00
-                                                      only scan these ranges, not the whole movie
-```
-
-No global "give me N stills" setting. Each scene earns stills in proportion to its length. Forty scenes, forty scenes' worth of stills.
-
-### Running the stages separately
+## Running the stages separately
 
 ```
 extract.bat scan video.mp4
@@ -151,8 +189,6 @@ extract.bat sheet stills\ --selection video.select.json
 ```
 
 Stage 1: CPU-only, multi-process, ~23s for three minutes of 1080p at 4 workers. Stage 2: instant, reads only the scan output. Stage 3: the expensive one, ~9-14s per still at 1080p on an RTX 5090, model loaded once and reused.
-
-Full command reference, memory/tiling guidance, measurements behind the defaults: [docs/docs.md](./docs/docs.md).
 
 ## Notes worth knowing
 

@@ -15,6 +15,13 @@ constraints are applied together:
 
 And one constraint inherited from stage 3: a restore window [i-k .. i+k] must
 lie inside a single scene, because blending frames across a cut is meaningless.
+
+There is a second, much simpler mode. `interval=N` ignores all of the above and
+takes the sharpest frame from every N seconds of video: no scenes, no quotas, no
+dedupe, no weak-frame rejection, one pick per interval unconditionally. It answers
+a different question -- "show me this video every N seconds, best frame of each" --
+and is meant for eyeballing a dense sample (with `run --no_restore`) and choosing
+by hand, rather than for the tool choosing well on its own.
 """
 
 import json
@@ -73,6 +80,12 @@ DEFAULT_MIN_LUMA = 24.0
 # does. 0.20 sits well clear of both sides of that measured gap.
 DEFAULT_MAX_HIGHLIGHT_FRAC = 0.20
 
+# Interval mode's floor and step. A tenth of a second is already finer than most
+# footage can distinguish -- at 25fps it is 2-3 frames to choose between -- and
+# the step keeps the intervals nameable: 0.5s means 0.5s, not 0.4999.
+MIN_INTERVAL_S = 0.1
+INTERVAL_STEP_S = 0.1
+
 
 def hamming(a: str, b: str) -> int:
     """Bit distance between two hex-encoded dHashes."""
@@ -107,7 +120,101 @@ def _allocate(eligible: dict, scenes: dict, fps: float, seconds_per_still: float
     return quota
 
 
+def _check_window(window: int) -> int:
+    if window < 5 or window % 4 != 1:
+        raise ValueError(f"window must be 4n+1 and at least 5, got {window}")
+    return window // 2
+
+
+def select_interval(meta: dict, *, interval: float,
+                    window: int = DEFAULT_WINDOW) -> dict:
+    """
+    Take the sharpest frame from every `interval` seconds. Nothing else.
+
+    No scene detection, no quotas, no dHash dedupe, no weak-frame rejection: an
+    interval that contains only dim or soft frames still yields its best one.
+    That is the point -- this mode samples the video uniformly and leaves the
+    judging to whoever looks at the contact sheet.
+
+    Intervals are anchored at the video's zero, not at the first frame scanned,
+    so a `--segment` run puts its frames in the same buckets they would have
+    landed in had the whole video been scanned, and the timestamps stay
+    predictable (with interval=2.0, buckets start at 0s, 2s, 4s ...). Intervals
+    with no scanned frames simply produce no pick.
+
+    The one thing it does not ignore is stage 3's window rule: within an interval
+    it prefers frames whose whole restore window fits inside one scene, falling
+    back to the outright sharpest only when the interval has no such frame (which
+    needs an interval short enough to sit entirely within `window // 2` frames of
+    a cut). The interval still yields exactly one pick either way; `window_unsafe`
+    counts the fallbacks. Blending across a cut produces a smeared still, and
+    silently emitting one would be worse than preferring a slightly softer frame.
+    """
+    half = _check_window(window)
+    if interval < MIN_INTERVAL_S:
+        raise ValueError(f"interval must be at least {MIN_INTERVAL_S}s, got {interval}")
+    steps = interval / INTERVAL_STEP_S
+    if abs(steps - round(steps)) > 1e-6:
+        raise ValueError(f"interval must be a multiple of {INTERVAL_STEP_S}s, got {interval}")
+    interval = round(round(steps) * INTERVAL_STEP_S, 1)
+
+    frames = meta["frames"]
+
+    # Positions whose whole window stays inside one scene. Built per scene, so a
+    # --segment run's boundaries count as cuts here exactly as they do elsewhere.
+    safe = set()
+    for scene in meta["scenes"]:
+        lo, hi = scene["start"] + half, scene["end"] - half
+        if hi >= lo:
+            safe.update(range(lo, hi + 1))
+
+    buckets = {}
+    for pos, frame in enumerate(frames):
+        # The epsilon keeps a frame landing exactly on a boundary (t=2.0 with
+        # interval=0.5) out of the interval below it.
+        buckets.setdefault(int(frame["t"] / interval + 1e-9), []).append(pos)
+
+    chosen, unsafe = [], 0
+    for key in sorted(buckets):
+        positions = buckets[key]
+        usable = [p for p in positions if p in safe]
+        if not usable:
+            usable = positions
+            unsafe += 1
+        chosen.append(frames[max(usable, key=lambda p: frames[p]["sharpness"])])
+
+    picks = [{
+        "frame": f["i"],
+        "t": f["t"],
+        "scene": f.get("scene"),
+        "sharpness": f["sharpness"],
+        "dhash": f["dhash"],
+        "window": [f["i"] - half, f["i"] + half],
+    } for f in chosen]
+
+    return {
+        "select_version": SELECT_VERSION,
+        "scan_version": meta.get("scan_version"),
+        "video": meta["video"],
+        "content_box": meta["content_box"],
+        "select": {
+            "mode": "interval",
+            "selected": len(picks),
+            "window": window,
+            "interval_s": interval,
+            "intervals": len(buckets),
+            # Picks whose window crosses a cut because their interval offered
+            # nothing better. Non-zero means short intervals near cuts.
+            "window_unsafe": unsafe,
+            "eligible_frames": len(frames),
+        },
+        "scenes": meta["scenes"],
+        "picks": picks,
+    }
+
+
 def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
+                  interval: float | None = None,
                   seconds_per_still: float = DEFAULT_SECONDS_PER_STILL,
                   per_scene_max: int = DEFAULT_PER_SCENE_MAX,
                   hash_distance: int = DEFAULT_HASH_DISTANCE,
@@ -119,9 +226,14 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
     """
     Pick frames to restore. Returns a select-metadata dict.
 
+    Stage 2's entry point either way: `interval` hands off to select_interval()
+    and none of the scene-mode arguments below apply.
+
     meta:                the dict written by stage 1
     window:              restore window size; picks are kept far enough from a
                          cut that the whole window stays inside one scene
+    interval:            switch to interval mode -- sharpest frame per N seconds,
+                         ignoring everything else in this list
     seconds_per_still:   scene time that earns one still
     per_scene_max:       ceiling per scene (there is no global ceiling)
     hash_distance:       minimum dHash Hamming distance between picks
@@ -131,8 +243,10 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
     min_luma:            reject frames dimmer than this mean luminance
     max_highlight_frac:  reject frames with more than this fraction blown out
     """
-    if window < 5 or window % 4 != 1:
-        raise ValueError(f"window must be 4n+1 and at least 5, got {window}")
+    if interval:
+        return select_interval(meta, interval=interval, window=window)
+
+    half = _check_window(window)
     if meta.get("scan_version", 1) < 2 and min_luma > 0:
         raise ValueError(
             "this scan predates per-frame luma, so near-black frames cannot be "
@@ -148,7 +262,6 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
     fps = meta["video"]["fps"]
     min_gap = int(round(min_gap_s * fps))
 
-    half = window // 2
     frames = meta["frames"]
     scenes = {s["id"]: s for s in meta["scenes"]}
 
@@ -279,6 +392,7 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
         "video": meta["video"],
         "content_box": box,
         "select": {
+            "mode": "scene",
             "selected": len(picks),
             "window": window,
             "seconds_per_still": seconds_per_still,

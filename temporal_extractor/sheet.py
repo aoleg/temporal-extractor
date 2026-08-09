@@ -39,6 +39,22 @@ def still_name(video_stem: str, scene, frame: int, seed=None) -> str:
     return f"{video_stem}{scene_part}_f{frame:06d}{seed_part}.png"
 
 
+# What --upscale-stills appends. A suffix rather than a separate folder so the
+# pair sits together in one listing, and so STILL_PATTERN still finds the
+# frame/scene it was built from -- the upscaled copy keeps its provenance.
+UPSCALED_SUFFIX = "_upscaled"
+
+
+def upscaled_name(path) -> Path:
+    """The companion --upscale-stills writes beside a kept still."""
+    path = Path(path)
+    return path.with_name(f"{path.stem}{UPSCALED_SUFFIX}.png")
+
+
+def is_upscaled(path) -> bool:
+    return Path(path).stem.endswith(UPSCALED_SUFFIX)
+
+
 def parse_still_name(path) -> dict:
     """Recover frame/scene/seed from a still filename; empty dict if it does not match."""
     m = STILL_PATTERN.search(Path(path).stem)
@@ -142,6 +158,8 @@ def build_contact_sheet(entries: list[dict], *, columns: int = 5, thumb_width: i
             primary += f"  scene {entry['scene']}"
 
         bits = []
+        if entry.get("variant"):
+            bits.append(entry["variant"])
         if entry.get("seed") is not None:
             bits.append(f"seed {entry['seed']}")
         if entry.get("source_frames"):

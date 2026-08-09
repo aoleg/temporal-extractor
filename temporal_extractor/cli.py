@@ -35,6 +35,8 @@ from .select import (
     DEFAULT_PER_SCENE_MAX,
     DEFAULT_SECONDS_PER_STILL,
     DEFAULT_WINDOW,
+    INTERVAL_STEP_S,
+    MIN_INTERVAL_S,
     hamming,
     read_selection,
     select_frames,
@@ -108,8 +110,27 @@ def scan_kwargs(args) -> dict:
     }
 
 
+def interval_seconds(text: str) -> float:
+    """`--interval`'s type: at least MIN_INTERVAL_S, on the INTERVAL_STEP_S grid."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}")
+    if value < MIN_INTERVAL_S:
+        raise argparse.ArgumentTypeError(f"must be at least {MIN_INTERVAL_S}, got {text}")
+    steps = value / INTERVAL_STEP_S
+    if abs(steps - round(steps)) > 1e-6:
+        raise argparse.ArgumentTypeError(
+            f"must be a multiple of {INTERVAL_STEP_S}, got {text}")
+    return round(round(steps) * INTERVAL_STEP_S, 1)
+
+
 def select_kwargs(args) -> dict:
     """The select-stage knobs, shared by `select` and `run`."""
+    if args.interval:
+        # Interval mode uses none of the others -- no quotas, no gaps, no
+        # rejection. Forwarding them anyway would only hide that they do nothing.
+        return {"window": args.window, "interval": args.interval}
     return {
         "window": args.window,
         "seconds_per_still": args.seconds_per_still,
@@ -123,8 +144,41 @@ def select_kwargs(args) -> dict:
     }
 
 
+def _print_picks(sel: dict) -> None:
+    s = sel["select"]
+    print()
+    print(f"  {'frame':>7} {'time':>9} {'scene':>6} {'sharpness':>10}  window")
+    for p in sel["picks"]:
+        print(f"  {p['frame']:>7} {p['t']:>8.2f}s {p['scene']:>6} {p['sharpness']:>10.1f}  "
+              f"[{p['window'][0]}..{p['window'][1]}]")
+
+    # The closest pair is the honest measure of how varied the set is. Interval
+    # mode enforces no floor, but the number still says how much of a dense
+    # sample is near-duplicate.
+    if len(sel["picks"]) > 1:
+        pairs = [(hamming(a["dhash"], b["dhash"]), a["frame"], b["frame"])
+                 for i, a in enumerate(sel["picks"]) for b in sel["picks"][i + 1:]]
+        d, fa, fb = min(pairs)
+        floor = f" (floor {s['hash_distance']})" if "hash_distance" in s else ""
+        print(f"\nclosest pair: f{fa} and f{fb} at dHash distance {d}{floor}")
+
+
 def print_selection(sel: dict, picks: bool = False) -> None:
     s = sel["select"]
+    if s.get("mode") == "interval":
+        print(f"{sel['video']['filename']}: {s['selected']} picks, the sharpest frame of "
+              f"every {s['interval_s']}s "
+              f"({s['intervals']} intervals across {s['eligible_frames']} scanned frames, "
+              f"window {s['window']})")
+        print("interval mode: no scene quotas, no dedupe, no weak-frame rejection -- "
+              "every interval yields one pick")
+        if s["window_unsafe"]:
+            print(f"{s['window_unsafe']} pick(s) sit too close to a cut for their restore "
+                  "window to stay in one scene; their interval offered nothing further out")
+        if picks:
+            _print_picks(sel)
+        return
+
     print(f"{sel['video']['filename']}: {s['selected']} picks from "
           f"{s['eligible_frames']} eligible frames "
           f"(window {s['window']}, one still per {s['seconds_per_still']}s of scene, "
@@ -142,20 +196,8 @@ def print_selection(sel: dict, picks: bool = False) -> None:
         print(f"{s['filled']} pick(s) came from the within-scene maximin fill")
     print(f"scene quota: {s['scene_quota']}   gap floor per scene (frames): {s['scene_gap_frames']}")
 
-    if not picks:
-        return
-    print()
-    print(f"  {'frame':>7} {'time':>9} {'scene':>6} {'sharpness':>10}  window")
-    for p in sel["picks"]:
-        print(f"  {p['frame']:>7} {p['t']:>8.2f}s {p['scene']:>6} {p['sharpness']:>10.1f}  "
-              f"[{p['window'][0]}..{p['window'][1]}]")
-
-    # The closest pair is the honest measure of how varied the set is.
-    if len(sel["picks"]) > 1:
-        pairs = [(hamming(a["dhash"], b["dhash"]), a["frame"], b["frame"])
-                 for i, a in enumerate(sel["picks"]) for b in sel["picks"][i + 1:]]
-        d, fa, fb = min(pairs)
-        print(f"\nclosest pair: f{fa} and f{fb} at dHash distance {d} (floor {s['hash_distance']})")
+    if picks:
+        _print_picks(sel)
 
 
 def cmd_select(args) -> int:
@@ -328,6 +370,7 @@ def cmd_run(args) -> int:
         seeds=args.seeds,
         force=args.force,
         no_restore=args.no_restore,
+        upscale_stills=args.upscale_stills,
     )
     return 0
 
@@ -349,6 +392,12 @@ def _add_segment_arg(p) -> None:
 def _add_select_args(p) -> None:
     """Selection knobs, shared verbatim by `select` and `run`."""
     g = p.add_argument_group("selection")
+    g.add_argument("--interval", type=interval_seconds, default=None, metavar="SECONDS",
+                   help=f"interval mode: take the sharpest frame of every N seconds and "
+                        f"nothing else. Minimum {MIN_INTERVAL_S}, in steps of {INTERVAL_STEP_S}. "
+                        "Bypasses scene detection, quotas, dedupe and weak-frame rejection -- "
+                        "every interval yields exactly one pick, good or bad. Every other "
+                        "option in this group except --window is ignored")
     g.add_argument("--window", type=int, default=DEFAULT_WINDOW,
                    help=f"restore window size, 4n+1 (default {DEFAULT_WINDOW}). Picks stay far "
                         "enough from a cut that the window remains inside one scene")
@@ -469,11 +518,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="output directory (default: a folder beside the video, named after it)")
     run.add_argument("--force", action="store_true",
                      help="redo everything, ignoring existing scan, selection and stills")
-    run.add_argument("--no_restore", action="store_true",
-                     help="capture each pick straight from the video instead of restoring it: "
-                          "no SeedVR2, no GPU, seconds instead of minutes. The output directory "
-                          "is built exactly as usual (work JSONs, stills/, contact sheet, "
-                          "manifest), so the picks can be reviewed before paying for the restore")
+    mode = run.add_mutually_exclusive_group()
+    mode.add_argument("--no_restore", action="store_true",
+                      help="capture each pick straight from the video instead of restoring it: "
+                           "no SeedVR2, no GPU, seconds instead of minutes. The output directory "
+                           "is built exactly as usual (work JSONs, stills/, contact sheet, "
+                           "manifest), so the picks can be reviewed before paying for the restore")
+    mode.add_argument("--upscale-stills", dest="upscale_stills", action="store_true",
+                      help="restore whatever is still in stills/, and nothing else. The other "
+                           "half of --no_restore: preview, delete the ones you do not want, "
+                           "then run this to restore only the survivors. Each is written as "
+                           "<name>_upscaled.png beside the original, which is left in place")
     scan_group = run.add_argument_group("scan")
     scan_group.add_argument("--scene_threshold", type=float, default=DEFAULT_SCENE_THRESHOLD)
     scan_group.add_argument("--min_scene_len", type=int, default=DEFAULT_MIN_SCENE_LEN)

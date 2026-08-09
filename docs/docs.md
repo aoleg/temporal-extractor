@@ -79,10 +79,11 @@ Exit code 1 if anything is wrong. Cheap insurance before a long job.
 The whole pipeline.
 
 ```
-usage: temporal_extractor run [-h] [--out OUT] [--force] [--no_restore]
+usage: temporal_extractor run [-h] [--out OUT] [--force] [--no_restore | --upscale-stills]
                               [--scene_threshold SCENE_THRESHOLD] [--min_scene_len MIN_SCENE_LEN]
                               [--no_content_box] [--workers WORKERS] [--segment FROM TO]
-                              [--window WINDOW] [--seconds_per_still SECONDS_PER_STILL]
+                              [--interval SECONDS] [--window WINDOW]
+                              [--seconds_per_still SECONDS_PER_STILL]
                               [--per_scene_max PER_SCENE_MAX] [--hash_distance HASH_DISTANCE]
                               [--min_gap SECONDS] [--gap_fraction GAP_FRACTION]
                               [--min_sharpness_frac MIN_SHARPNESS_FRAC] [--min_luma MIN_LUMA]
@@ -108,6 +109,8 @@ below.
 | `--out DIR` | folder beside the video, named after it | output directory |
 | `--force` | off | redo everything, ignoring existing scan, selection and stills |
 | `--no_restore` | off | capture the picks straight from the video instead of restoring them |
+| `--upscale-stills` | off | restore only what is still in `stills/`, writing `<name>_upscaled.png` beside each |
+| `--interval SECONDS` | off | sharpest frame every N seconds, instead of scene-based selection |
 
 The few that are not forwarded only make sense for a single stage:
 `--show_scenes` and `--title` (display only), the per-stage `--out`, `--manifest`
@@ -175,10 +178,45 @@ were.
 `--seeds` is ignored under `--no_restore`: decoding a frame is deterministic, so N
 variants would be N identical files.
 
-Normal resume rules still apply, which is worth knowing if you delete previews you
-did not like: the picks live in `work/select.json`, so re-running `--no_restore`
-captures the missing ones again, identically. Deleting is not yet a way to narrow
-what gets restored.
+Note that re-running `--no_restore` after deleting previews just captures them
+again — the picks live in `work/select.json`, not in the folder. To act on the
+deletions, use `--upscale-stills`.
+
+### `--upscale-stills` — restore only what you kept
+
+The other half of `--no_restore`, and the reason it exists:
+
+```
+extract.bat run myvideo.mp4 --no_restore     # 1. previews, in seconds
+                                             # 2. look at contact_sheet.jpg,
+                                             #    delete the ones you don't want
+extract.bat run myvideo.mp4 --upscale-stills # 3. restore only the survivors
+```
+
+Step 3 restores whatever PNGs are still in `stills/` and nothing else. Each is
+written as `<name>_upscaled.png` **beside** its original, which is left in place,
+so the folder ends up holding before/after pairs. The contact sheet shows them
+adjacent and labels each cell `source` or `upscaled`.
+
+This is the one stage driven by the folder rather than by the selection: your
+deletions *are* the instruction, and a pick whose file is gone is a pick you
+rejected. The selection is still read, because a still's PNG cannot tell you
+which window it was centred on — and restoring that window is the entire point.
+
+What it skips, and says so:
+
+- files already named `*_upscaled.png`
+- stills whose `_upscaled.png` companion already exists (so it resumes, and
+  re-running a finished job starts no worker)
+- stills the manifest records as already restored — running those through again
+  would be restoring a restored image
+
+A PNG in `stills/` that matches no pick in the selection is reported and skipped:
+without a window there is nothing to restore it from. Deleting *everything* is
+not an error either; the run says there is nothing to lay out and leaves the
+existing sheet and manifest alone rather than overwriting them with emptiness.
+
+`--no_restore` and `--upscale-stills` are mutually exclusive.
 
 ---
 
@@ -302,6 +340,7 @@ extract.bat select <scan.json> [--out select.json]
 | Option | Default | Meaning |
 |---|---|---|
 | `--out PATH` | `<video>.select.json` | selection output |
+| `--interval SECONDS` | off | interval mode: sharpest frame every N seconds, ignoring everything below except `--window` |
 | `--window N` | `5` | restore window size, must be 4n+1 |
 | `--seconds_per_still N` | `4.0` | scene time earning one still |
 | `--per_scene_max N` | `8` | ceiling per scene |
@@ -312,7 +351,50 @@ extract.bat select <scan.json> [--out select.json]
 | `--min_luma N` | `24.0` | reject frames dimmer than this mean luminance; 0 disables |
 | `--max_highlight_frac F` | `0.20` | reject frames with more than this fraction blown out; 0 disables |
 
+### `--interval SECONDS` — uniform sampling instead of judgement
+
+A second, much simpler mode. `--interval N` takes the sharpest frame from every
+N seconds of video and does nothing else:
+
+```
+extract.bat run <video> --interval 2 --no_restore
+extract.bat select <scan.json> --interval 0.5
+```
+
+No scene quotas, no dHash dedupe, no weak-frame rejection. **Every interval
+yields exactly one pick**, however dark, soft or blown its best frame happens to
+be — a video with a fade to black gets picks from the black. That is the point:
+the mode samples the video uniformly and leaves the judging to whoever looks at
+the contact sheet. Everything else in the table above except `--window` is
+ignored, and `select` says so in its summary rather than pretending otherwise.
+
+Minimum `0.1`, in steps of `0.1`; anything else is rejected at the command line
+rather than quietly rounded. A tenth of a second is already finer than most
+footage can distinguish — at 25fps that is two or three frames to choose between.
+Note what short intervals cost: a 60s clip at `--interval 0.1` is 600 stills,
+which is fine to look at but is hours of restoring.
+
+Intervals are anchored at the video's zero, not at the first frame scanned, so
+`--interval 2` always buckets at 0s, 2s, 4s … and a `--segment` run's frames land
+in the same buckets they would have with a full scan. Intervals containing no
+scanned frames simply produce no pick.
+
+The one rule it does **not** ignore is stage 3's: within an interval it prefers
+frames whose whole restore window stays inside one scene, and only falls back to
+the outright sharpest when the interval has no such frame — which needs an
+interval short enough to sit entirely within `window // 2` frames of a cut. Either
+way the interval still yields its one pick; `select` reports how many fell back,
+and `window_unsafe` in the selection JSON records the count. A window blending
+across a cut produces a smeared still, so emitting one silently would be worse
+than taking a slightly softer frame.
+
+Interval mode pairs with `--no_restore`: sample the video densely, look at the
+sheet, then restore. Contact-sheet cells stay labelled with frame, timestamp and
+scene as usual, so a pick can always be traced back.
+
 ### How many stills you get
+
+This section is about the default (scene) mode; `--interval` replaces all of it.
 
 There is **no global count**. Each scene earns one still per
 `--seconds_per_still` of its own duration, with a floor of one and a ceiling of
