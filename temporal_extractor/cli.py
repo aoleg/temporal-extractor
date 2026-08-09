@@ -327,6 +327,7 @@ def cmd_run(args) -> int:
                     "quality": args.quality},
         seeds=args.seeds,
         force=args.force,
+        no_restore=args.no_restore,
     )
     return 0
 
@@ -468,6 +469,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="output directory (default: a folder beside the video, named after it)")
     run.add_argument("--force", action="store_true",
                      help="redo everything, ignoring existing scan, selection and stills")
+    run.add_argument("--no_restore", action="store_true",
+                     help="capture each pick straight from the video instead of restoring it: "
+                          "no SeedVR2, no GPU, seconds instead of minutes. The output directory "
+                          "is built exactly as usual (work JSONs, stills/, contact sheet, "
+                          "manifest), so the picks can be reviewed before paying for the restore")
     scan_group = run.add_argument_group("scan")
     scan_group.add_argument("--scene_threshold", type=float, default=DEFAULT_SCENE_THRESHOLD)
     scan_group.add_argument("--min_scene_len", type=int, default=DEFAULT_MIN_SCENE_LEN)

@@ -79,10 +79,10 @@ Exit code 1 if anything is wrong. Cheap insurance before a long job.
 The whole pipeline.
 
 ```
-usage: temporal_extractor run [-h] [--out OUT] [--force] [--scene_threshold SCENE_THRESHOLD]
-                              [--min_scene_len MIN_SCENE_LEN] [--no_content_box]
-                              [--workers WORKERS] [--segment FROM TO] [--window WINDOW]
-                              [--seconds_per_still SECONDS_PER_STILL]
+usage: temporal_extractor run [-h] [--out OUT] [--force] [--no_restore]
+                              [--scene_threshold SCENE_THRESHOLD] [--min_scene_len MIN_SCENE_LEN]
+                              [--no_content_box] [--workers WORKERS] [--segment FROM TO]
+                              [--window WINDOW] [--seconds_per_still SECONDS_PER_STILL]
                               [--per_scene_max PER_SCENE_MAX] [--hash_distance HASH_DISTANCE]
                               [--min_gap SECONDS] [--gap_fraction GAP_FRACTION]
                               [--min_sharpness_frac MIN_SHARPNESS_FRAC] [--min_luma MIN_LUMA]
@@ -107,6 +107,7 @@ below.
 |---|---|---|
 | `--out DIR` | folder beside the video, named after it | output directory |
 | `--force` | off | redo everything, ignoring existing scan, selection and stills |
+| `--no_restore` | off | capture the picks straight from the video instead of restoring them |
 
 The few that are not forwarded only make sense for a single stage:
 `--show_scenes` and `--title` (display only), the per-stage `--out`, `--manifest`
@@ -134,6 +135,50 @@ finished work.
 
 The worker only starts when there is restoring left to do, so re-running a
 finished job costs under a second rather than a model load.
+
+### `--no_restore` — review the picks before paying for them
+
+Restoring is the expensive part: seconds of GPU per still, minutes for a whole
+video. `--no_restore` replaces stage 3 with a straight capture of each pick's
+centre frame — the same frame the restorer would have been centred on, cropped to
+the same content box, written under the same filename.
+
+```
+extract.bat run <video> --no_restore
+```
+
+Everything else is produced exactly as usual: `work/scan.json`,
+`work/select.json`, `stills/`, `contact_sheet.jpg` and `manifest.json`. What you
+get is the tool's choice of frames, at source resolution, in seconds instead of
+minutes, and without needing a working SeedVR2 install or a GPU at all. It is the
+fastest way to answer "are these the right frames?" before committing to the
+restore, and to tune the selection knobs against something you can look at.
+
+The stills are byte-identical to the source frames, so the contact sheet shows
+the footage as it is — soft, noisy, small. Judge the *choice* of frames on it,
+not their quality.
+
+The manifest records, per still, whether it was actually restored:
+
+```json
+{ "file": "clip_s000_f000088.png", "frame": 88, "restored": false }
+```
+
+That record — not the flag you passed — is what later runs trust, because both
+modes write to the same filenames. A restore run that finds un-restored stills in
+its output directory stops with a message rather than quietly overwriting the
+previews you are reviewing; delete them or pass `--force`. A `--no_restore` run
+over a directory of real stills leaves them alone and keeps them marked restored.
+Manifests written before this field existed read as restored, which is what they
+were.
+
+`--seeds` is ignored under `--no_restore`: decoding a frame is deterministic, so N
+variants would be N identical files.
+
+Normal resume rules still apply, which is worth knowing if you delete previews you
+did not like: the picks live in `work/select.json`, so re-running `--no_restore`
+captures the missing ones again, identically. Deleting is not yet a way to narrow
+what gets restored.
 
 ---
 

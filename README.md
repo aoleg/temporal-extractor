@@ -118,6 +118,14 @@ myvideo/
 
 Re-running continues where it left off. Interrupted job costs nothing to resume; finished one re-runs in under a second.
 
+### Check the picks first
+
+```
+extract.bat run myvideo.mp4 --no_restore
+```
+
+Same output folder, same filenames, same contact sheet - but the stills are captured straight from the video instead of restored. No GPU, no SeedVR2, seconds instead of minutes. Look at the sheet, decide whether these are the frames you want, then run again without the flag. Restoring is the expensive part; this is how you avoid spending it on the wrong frames.
+
 ### Common adjustments
 
 ```

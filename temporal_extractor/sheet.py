@@ -168,7 +168,7 @@ def build_manifest(entries: list[dict], *, selection: dict | None = None,
     for entry in entries:
         record = {k: entry[k] for k in
                   ("file", "frame", "scene", "t", "seed", "window", "source_frames",
-                   "source_sharpness", "width", "height")
+                   "source_sharpness", "width", "height", "restored")
                   if k in entry}
         stills.append(record)
 
