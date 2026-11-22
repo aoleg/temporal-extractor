@@ -419,6 +419,56 @@ def select_frames(meta: dict, *, window: int = DEFAULT_WINDOW,
     }
 
 
+# select_frames()'s scene-mode keyword arguments. Each is recorded under the same
+# name in a selection's "select" block, which is what lets a saved selection be
+# compared with a new request without a separate record of the options.
+_SCENE_OPTIONS = {
+    "window": DEFAULT_WINDOW,
+    "seconds_per_still": DEFAULT_SECONDS_PER_STILL,
+    "per_scene_max": DEFAULT_PER_SCENE_MAX,
+    "hash_distance": DEFAULT_HASH_DISTANCE,
+    "min_gap_s": DEFAULT_MIN_GAP_S,
+    "gap_fraction": DEFAULT_GAP_FRACTION,
+    "min_sharpness_frac": DEFAULT_MIN_SHARPNESS_FRAC,
+    "min_luma": DEFAULT_MIN_LUMA,
+    "max_highlight_frac": DEFAULT_MAX_HIGHLIGHT_FRAC,
+}
+
+
+def requested_options(**opts) -> dict:
+    """
+    The options a select_frames(**opts) call would run with, defaults filled in.
+
+    Interval mode keeps only `interval` and `window`, because it uses nothing
+    else: two interval requests that differ in a scene-mode knob are the same
+    request.
+    """
+    if opts.get("interval"):
+        return {"interval": round(float(opts["interval"]), 1),
+                "window": opts.get("window", DEFAULT_WINDOW)}
+    return {key: opts.get(key, default) for key, default in _SCENE_OPTIONS.items()}
+
+
+def selection_options(sel: dict) -> dict:
+    """The options a saved selection was made with, in requested_options() form."""
+    s = sel["select"]
+    if s.get("mode") == "interval":
+        return {"interval": s.get("interval_s"), "window": s.get("window")}
+    return {key: s.get(key) for key in _SCENE_OPTIONS}
+
+
+def describe_option_change(have: dict, wanted: dict) -> str:
+    """One line saying how `wanted` differs from `have`, for the run log."""
+    def mode(options):
+        return (f"every {options['interval']}s" if "interval" in options
+                else "scene-based")
+
+    if ("interval" in have) != ("interval" in wanted):
+        return f"{mode(have)} -> {mode(wanted)}"
+    return ", ".join(f"{key} {have.get(key)} -> {wanted[key]}"
+                     for key in wanted if have.get(key) != wanted[key])
+
+
 def write_selection(sel: dict, path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

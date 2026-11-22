@@ -75,13 +75,21 @@ def _find_videos(folder: Path) -> list:
 # chosen", so the quick path steps aside and the real one runs (still without
 # restoring). Sheet and output options are deliberately absent: --out, --columns
 # and friends apply to a quick preview perfectly well.
-PIPELINE_FLAGS = frozenset({
+#
+# The selection half is named on its own because `run` treats it differently on
+# a re-run: typing one of these with a value the saved selection was not made
+# with replaces that selection. See run_pipeline()'s select_explicit.
+SELECT_FLAGS = frozenset({
     "--interval", "--window", "--seconds_per_still", "--per_scene_max",
     "--hash_distance", "--min_gap", "--gap_fraction", "--min_sharpness_frac",
     "--min_luma", "--max_highlight_frac",
-    "--scene_threshold", "--min_scene_len", "--no_content_box", "--workers",
-    "--segment",
 })
+# The scan options get the same treatment, one stage up. --workers is not among
+# them: it changes how fast the scan runs, not what it finds.
+SCAN_FLAGS = frozenset({
+    "--scene_threshold", "--min_scene_len", "--no_content_box", "--segment",
+})
+PIPELINE_FLAGS = SELECT_FLAGS | SCAN_FLAGS | frozenset({"--workers"})
 
 
 def _configured(argv) -> set:
@@ -408,6 +416,11 @@ def _run_pipeline_kwargs(args) -> dict:
     return dict(
         scan_opts={**scan_kwargs(args), "show_progress": not args.quiet},
         select_opts=select_kwargs(args),
+        # argparse fills in every default, so the values alone cannot say
+        # whether the user asked for them. Only a typed selection option may
+        # replace a saved selection; a bare re-run must resume it.
+        select_explicit=bool(getattr(args, "configured_flags", set()) & SELECT_FLAGS),
+        scan_explicit=bool(getattr(args, "configured_flags", set()) & SCAN_FLAGS),
         restore_opts={
             "resolution": args.resolution,
             "seed": args.seed,

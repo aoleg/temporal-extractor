@@ -139,6 +139,52 @@ finished work.
 The worker only starts when there is restoring left to do, so re-running a
 finished job costs under a second rather than a model load.
 
+### Changing the selection on a re-run
+
+The saved selection (`work/select.json`) is reused only while it still matches what you ask for. Type a selection option whose value differs from the one the selection was made with, and the frames are selected again from the existing scan:
+
+```
+extract.bat run <video> --preview --interval 2     15 stills from a 30s clip
+extract.bat run <video> --preview --interval 10    selected again: 3 stills
+```
+
+The log says so: `select: options changed (interval 2.0 -> 10.0), selecting again`.
+
+The selection options are `--interval`, `--window`, `--seconds_per_still`, `--per_scene_max`, `--hash_distance`, `--min_gap`, `--gap_fraction`, `--min_sharpness_frac`, `--min_luma` and `--max_highlight_frac`. The comparison is on the whole set, so dropping an option you typed last time counts as changing it back to its default.
+
+What happens to the stills already in `stills/`:
+
+- A preview the new selection no longer picks is removed. It is a frame copied from the video, and a later run can capture it again.
+- A preview the new selection still picks is kept and not captured twice.
+- A restored still is never removed. Neither is the source half of an `_upscaled` pair, nor any file the manifest does not record as a preview. The log counts what was left in place.
+
+Two cases keep the saved selection:
+
+- A re-run that types no selection option. That is a resume, whatever options the first run used.
+- `--upscale-stills`. It restores what is in `stills/`, and each still's window comes from the selection it was previewed with. A differing selection option is reported and ignored.
+
+### Changing the scan on a re-run
+
+The saved scan (`work/scan.json`) follows the same rule, one stage up. Type a scan option whose value differs from the one the scan was made with, and the video is scanned again:
+
+```
+extract.bat run <video> --preview --interval 5 --segment 5:00 15:00
+extract.bat run <video> --preview --interval 5 --segment 20:00 30:00    scanned again
+```
+
+The log says so: `scan: options changed (segments 05:00.000-15:00.000 -> 20:00.000-30:00.000), scanning again`.
+
+The scan options are `--segment`, `--scene_threshold`, `--min_scene_len` and `--no_content_box`. `--workers` is not one of them: it changes how fast the scan runs, not what it finds. As with the selection, the comparison is on the whole set. A scan option typed without `--segment` asks for the whole video, and a segmented scan is replaced by a full one.
+
+A new scan always means a new selection, because the saved one refers to scenes and frames of the scan it replaced. If the run types no selection option, the frames are selected the way they were before: an `--interval 5` selection stays an `--interval 5` selection over the new scan. Stale previews are removed as described above.
+
+The saved scan is kept in the same two cases:
+
+- A re-run that types no scan option. `--preview --interval 10` after a run with `--segment` keeps the segmented scan, and the log notes that it covers segments and not the whole video. A full scan of a long film is not started unless a scan option asks for it.
+- `--upscale-stills`. A differing scan option is reported and ignored.
+
+`--force` still redoes everything regardless.
+
 ### `--preview [N]` — a fast look, two different ways
 
 `--preview` has two behaviours, and which one you get depends on whether you
@@ -234,9 +280,11 @@ apart.
 `--seeds` is ignored under `--preview` either way: decoding a frame is
 deterministic, so N variants would be N identical files.
 
-Note that re-running the full `--preview` path after deleting previews just
-captures them again — the picks live in `work/select.json`, not in the folder.
-To act on the deletions, use `--upscale-stills`.
+Note that re-running the full `--preview` path with the same options after
+deleting previews just captures them again — the picks live in
+`work/select.json`, not in the folder. To act on the deletions, use
+`--upscale-stills`. To get a different set of candidates, change a selection
+option: see [Changing the selection on a re-run](#changing-the-selection-on-a-re-run).
 
 ### Folder input — preview a whole batch at once
 

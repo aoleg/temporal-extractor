@@ -42,8 +42,21 @@ import cv2
 
 from .frames import read_png_rgb, write_png_rgb
 from .restore import SeedVR2Restorer
-from .scan import read_scan, scan_video, write_scan
-from .select import read_selection, select_frames, write_selection
+from .scan import (
+    read_scan,
+    requested_scan_options,
+    scan_option_change,
+    scan_video,
+    write_scan,
+)
+from .select import (
+    describe_option_change,
+    read_selection,
+    requested_options,
+    select_frames,
+    selection_options,
+    write_selection,
+)
 from .sheet import (
     build_contact_sheet,
     build_manifest,
@@ -84,6 +97,35 @@ def _prior_restored(manifest_path: Path) -> dict:
         return {}
     return {s["file"]: s.get("restored", True)
             for s in data.get("stills", []) if "file" in s}
+
+
+def _drop_stale_previews(stills_dir: Path, expected: set, prior: dict, log) -> None:
+    """
+    After a new selection replaces an old one, clear the old one's previews.
+
+    A preview is a frame copied out of the video, so one that the new selection
+    no longer picks is only clutter: left in place it would sit on the contact
+    sheet beside the new candidates, and the number of stills would never follow
+    the selection options. Removing it loses nothing a re-run cannot recapture.
+
+    Only files the previous manifest records as un-restored are removed. A
+    restored still cost GPU time, a file the manifest does not know may be the
+    user's own, and the source half of an upscaled pair is kept with its pair.
+    """
+    removed, kept = 0, 0
+    for path in sorted(stills_dir.glob("*.png")):
+        if is_upscaled(path) or path.name in expected:
+            continue
+        if prior.get(path.name) is False and not upscaled_name(path).exists():
+            path.unlink()
+            removed += 1
+        else:
+            kept += 1
+    if removed:
+        log(f"select: removed {removed} preview(s) the new selection no longer picks")
+    if kept:
+        log(f"select: {kept} other still(s) already in {stills_dir.name}/ are outside "
+            "the new selection and were left in place")
 
 
 def _kept_stills(stills_dir: Path, selection: dict, was_restored: dict, seed: int,
@@ -175,8 +217,21 @@ def choose_variants(variants: list[dict]) -> list[dict]:
 def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
                  worker_opts=None, sheet_opts=None, scan_opts=None,
                  seeds=1, force=False, preview=False, upscale_stills=False,
-                 log=print) -> dict:
-    """Run every stage. Returns the manifest."""
+                 select_explicit=None, scan_explicit=None, log=print) -> dict:
+    """
+    Run every stage. Returns the manifest.
+
+    select_explicit, scan_explicit: whether `select_opts` / `scan_opts` is
+    something the caller asked for, as opposed to defaults passed along. An
+    explicit request that differs from the options the saved selection or scan
+    was made with replaces it; a request that is only defaults leaves it alone,
+    so a plain re-run resumes. None means "explicit if the options were given
+    at all".
+    """
+    if select_explicit is None:
+        select_explicit = bool(select_opts)
+    if scan_explicit is None:
+        scan_explicit = bool(scan_opts)
     video = Path(video).resolve()
     out_dir = Path(out_dir) if out_dir else video.parent / video.stem
     work = out_dir / "work"
@@ -184,19 +239,42 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
     manifest_path = out_dir / "manifest.json"
     stills_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
-    was_restored = {} if force else _prior_restored(manifest_path)
+    # What the last run recorded. `was_restored` is the working copy this run
+    # trusts and updates; --force starts it empty so every still is redone, but
+    # the record itself is still needed for files this run does not rewrite.
+    prior = _prior_restored(manifest_path)
+    was_restored = {} if force else dict(prior)
 
     # --- stage 1 -------------------------------------------------------------
+    # Reused when it is there, for the same reason as the selection below and
+    # with the same exception: an explicit request for different scan options
+    # is answered with a new scan, not with the old one under a new name.
     scan_path = work / "scan.json"
     meta = None
+    scanned_now = False
     if scan_path.exists() and not force:
         try:
             meta = read_scan(scan_path)
-            log(f"scan: reusing {scan_path}")
         except ValueError as exc:
             # A stale schema is not a reason to stop; it is a reason to redo it.
             log(f"scan: {exc}")
-    if meta is None:
+    if meta is not None and scan_explicit:
+        change = scan_option_change(meta, requested_scan_options(**(scan_opts or {})))
+        if change and upscale_stills:
+            # Same reason the selection is kept in this mode: a new scan means
+            # a new selection, and the kept stills would lose their windows.
+            log(f"scan: options differ from the saved scan ({change}); "
+                "ignored, --upscale-stills restores what is in stills/")
+        elif change:
+            log(f"scan: options changed ({change}), scanning again")
+            meta = None
+    if meta is not None:
+        segments = meta["scan"].get("segments")
+        log(f"scan: reusing {scan_path}"
+            + (f" (covers {len(segments)} segment(s), not the whole video)"
+               if segments else ""))
+    else:
+        scanned_now = True
         log(f"scan: decoding {video.name} ...")
         meta = scan_video(video, **(scan_opts or {}))
         _atomic_json(write_scan, meta, scan_path)
@@ -206,17 +284,52 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
     # --- stage 2 -------------------------------------------------------------
     # Recomputed unless it is already there: cheap, but reusing keeps the picks
     # stable across a resume so existing stills stay meaningful.
+    #
+    # The exception is an explicit request for different options. Reusing the
+    # old selection then would make the option look as if it did nothing: the
+    # same picks and the same number of stills whatever value was passed.
     select_path = work / "select.json"
+    stem = video.stem[:32]
     selection = None
-    if select_path.exists() and not force:
+    replaced = select_path.exists()
+    if replaced and not force:
         try:
             selection = read_selection(select_path)
-            log(f"select: reusing {select_path}")
         except ValueError as exc:
             log(f"select: {exc}")
-    if selection is None:
+    if selection is not None and scanned_now and not upscale_stills:
+        # The saved selection indexes into a scan that has just been replaced:
+        # its scenes and eligible frames are not this scan's. Select again, and
+        # unless this run asks for something else, the way it was selected
+        # before -- a new --segment must not quietly switch an interval
+        # selection back to scene mode.
+        if not select_explicit:
+            select_opts = {key: value for key, value in selection_options(selection).items()
+                           if value is not None}
+        log("select: the scan is new, selecting again")
+        selection = None
+    if selection is not None and select_explicit:
+        have = selection_options(selection)
+        wanted = requested_options(**(select_opts or {}))
+        if have != wanted:
+            change = describe_option_change(have, wanted)
+            if upscale_stills:
+                # This stage is driven by the folder, and each still's window
+                # comes from the selection it was previewed with. A new
+                # selection would orphan the stills the user chose to keep.
+                log(f"select: options differ from the saved selection ({change}); "
+                    "ignored, --upscale-stills restores what is in stills/")
+            else:
+                log(f"select: options changed ({change}), selecting again")
+                selection = None
+    if selection is not None:
+        log(f"select: reusing {select_path}")
+    else:
         selection = select_frames(meta, **(select_opts or {}))
         _atomic_json(write_selection, selection, select_path)
+        if replaced and not upscale_stills:
+            expected = {still_name(stem, p["scene"], p["frame"]) for p in selection["picks"]}
+            _drop_stale_previews(stills_dir, expected, prior, log)
     s = selection["select"]
     log(f"select: {s['selected']} picks, "
         + (f"one per {s['interval_s']}s interval" if s.get("mode") == "interval"
@@ -224,7 +337,6 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
 
     # --- stage 3 -------------------------------------------------------------
     box = selection["content_box"]
-    stem = video.stem[:32]
     if preview:
         # A seed only means something to the restorer; N variants of a decoded
         # frame would be N identical files under different names.
@@ -325,9 +437,10 @@ def run_pipeline(video, out_dir=None, *, select_opts=None, restore_opts=None,
     for entry in entries:
         img = read_png_rgb(entry["path"])
         entry["height"], entry["width"] = img.shape[:2]
-        # Anything on disk that no manifest accounts for predates this field and
-        # can only have come from a restore.
-        entry["restored"] = was_restored.get(entry["file"], True)
+        # A file this run did not write keeps what the last manifest said of it
+        # (under --force the working copy starts empty). Anything no manifest
+        # accounts for predates this field and can only have come from a restore.
+        entry["restored"] = was_restored.get(entry["file"], prior.get(entry["file"], True))
 
     raw = sum(1 for e in entries if not e["restored"])
     # After --upscale-stills the sheet holds before/after pairs at the same

@@ -61,6 +61,7 @@ import numpy as np
 
 from .frames import content_box_from_projection
 from .progress import ProgressBar
+from .timecode import format_timestamp
 
 # 4: added per-frame highlight_frac.
 # 3: cheaper equivalent metrics (CV_32F sharpness, dHash and scene delta from
@@ -442,6 +443,12 @@ def scan_video(path, *, scene_threshold: float = DEFAULT_SCENE_THRESHOLD,
             # threshold on an absolute value or compare across videos.
             "sharpness_metric": "variance_of_laplacian",
             "segments": segment_meta,
+            # The request as it was made, for scan_option_change(). `segments`
+            # above is the same thing snapped to frames, and content_box_samples
+            # is 0 both when detection was off and when it found nothing, so
+            # neither can say what was asked for.
+            "detect_content_box": bool(detect_content_box),
+            "segments_requested": _normalise_segments(segments),
         },
         "scenes": scenes,
         "frames": records,
@@ -605,6 +612,76 @@ def _scan_one_segment(path, seg_start, seg_stop, box, work_size, workers,
         for rec in seg_records[scene["start"]:scene["end"] + 1]:
             rec["scene"] = scene["id"]
     return seg_records, seg_scenes, n_workers
+
+
+def _normalise_segments(segments):
+    """`--segment` pairs in a form that survives JSON and ignores their order."""
+    if not segments:
+        return None
+    return sorted([round(float(start), 3), round(float(end), 3)] for start, end in segments)
+
+
+def _describe_segments(segments) -> str:
+    if not segments:
+        return "whole video"
+    return ", ".join(f"{format_timestamp(start)}-{format_timestamp(end)}"
+                     for start, end in segments)
+
+
+def requested_scan_options(*, scene_threshold: float = DEFAULT_SCENE_THRESHOLD,
+                           min_scene_len: int = DEFAULT_MIN_SCENE_LEN,
+                           detect_content_box: bool = True,
+                           segments=None, **_not_compared) -> dict:
+    """
+    The options of a scan_video() call that decide what the scan contains.
+
+    `workers` and `show_progress` are accepted and dropped: chunked output is
+    bit-identical to serial, so neither changes the result.
+    """
+    return {
+        "scene_threshold": scene_threshold,
+        "min_scene_len": min_scene_len,
+        "detect_content_box": bool(detect_content_box),
+        "segments": _normalise_segments(segments),
+    }
+
+
+def scan_option_change(meta: dict, wanted: dict) -> str:
+    """
+    How `wanted` (from requested_scan_options()) differs from the options a
+    saved scan was made with. Empty when the saved scan already answers it.
+
+    A scan written before the request was recorded is compared on what it does
+    hold: the frame ranges its segments resolved to, and whether a content box
+    was measured. Where that cannot say (no box samples: detection off, or on
+    and nothing found), the scan is taken to match, because a wrong "changed"
+    costs a full decode pass.
+    """
+    s = meta["scan"]
+    changes = [f"{key} {s.get(key)} -> {wanted[key]}"
+               for key in ("scene_threshold", "min_scene_len")
+               if s.get(key) != wanted[key]]
+
+    if "detect_content_box" in s:
+        had_box = s["detect_content_box"]
+    else:
+        had_box = True if s.get("content_box_samples") else None
+    if had_box is not None and had_box != wanted["detect_content_box"]:
+        changes.append("content box detection " + ("on -> off" if had_box else "off -> on"))
+
+    if "segments_requested" in s:
+        same = s["segments_requested"] == wanted["segments"]
+        had_segments = _describe_segments(s["segments_requested"])
+    else:
+        stored = s.get("segments") or []
+        resolved = (resolve_segments(wanted["segments"], meta["video"]["fps"])
+                    if wanted["segments"] else [])
+        same = [(x["start"], x["end"] + 1) for x in stored] == resolved
+        had_segments = _describe_segments([(x["start_t"], x["end_t"]) for x in stored])
+    if not same:
+        changes.append(f"segments {had_segments} -> {_describe_segments(wanted['segments'])}")
+
+    return ", ".join(changes)
 
 
 def write_scan(meta: dict, path) -> Path:

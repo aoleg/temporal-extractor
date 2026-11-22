@@ -24,6 +24,8 @@ myvideo/
 
 Re-running continues where it left off. An interrupted job costs nothing to resume; a finished one re-runs in under a second.
 
+Re-run with a different selection option (`--interval 10` after `--interval 2`, say) and the frames are picked again from the existing scan. Previews the new selection doesn't pick are removed, so `stills/` always matches what you asked for. Restored stills are never removed. Scan options work the same way: change `--segment` or `--scene_threshold` and the video is scanned again, then selected again.
+
 ### Preview Mode - no SeedVR2 needed
 
 Bypasses the upscaler entirely. No GPU, and **it runs without SeedVR2 installed at all** - so this half of the tool works on a machine that can't run the model.
@@ -90,6 +92,8 @@ extract.bat run myvideo.mp4 --upscale-stills          3. upscale only the surviv
 ```
 
 Step 1 needs a selection option - `--interval`, `--seconds_per_still`, whatever suits the footage. That's what puts real candidate stills in `stills/`. Bare `--preview` is the other thing: a quick look that writes to `preview/` and feeds nothing.
+
+Too many candidates, or too few? Run step 1 again with a different value. `--interval` is seconds per still, so a bigger number means fewer stills: `--interval 10` gives about a tenth of what `--interval 1` does. The scan is reused, so it takes seconds.
 
 Step 3 restores whatever is left in `stills/` and nothing else. Each one is written as `<name>_upscaled.png` beside its original, which stays put - so you end up with before/after pairs, and the new contact sheet shows them side by side, labelled `source` and `upscaled`.
 
