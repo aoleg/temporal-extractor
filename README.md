@@ -178,7 +178,7 @@ Have both an original and an upscale of the same footage? Feed it the original.
 - Windows, recent Python on `PATH`
 - For Preview Mode, that's it - no GPU, no SeedVR2
 - For restoring: an NVIDIA GPU - comfortable at 1080p on 12 GB, 1440p with long windows wants ~20 GB
-- Plus a SeedVR2 checkout, its model files, and a separate virtualenv with torch for it. Pull it from here: https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler, and the models from here https://huggingface.co/numz/SeedVR2_comfyUI
+- Plus a SeedVR2 checkout, its model files, and a separate virtualenv with torch for it - see [Installing SeedVR2](#installing-seedvr2)
 
 ## Install
 
@@ -194,7 +194,7 @@ SEEDVR2_PYTHON=E:\envs\seedvr2\Scripts\python.exe
 MODEL_DIR=F:\checkpoints\seedvr2
 ```
 
-All three are required to restore. Preview Mode never reads them, so you can leave them alone until you have SeedVR2 set up.
+All three are required to restore. Preview Mode never reads them, so you can leave them alone until you have SeedVR2 set up - see [Installing SeedVR2](#installing-seedvr2).
 
 Checkpoint filenames default to the common SeedVR2 release names. Set `DIT_MODEL` / `VAE_MODEL` when yours differ - quantisation variants (fp16, fp8, int8, nvfp4) all have different filenames, and files get renamed in practice.
 
@@ -205,6 +205,69 @@ extract.bat doctor
 ```
 
 Validates paths, lists what it finds in `MODEL_DIR` on a name mismatch, starts the restore worker to confirm the model loads.
+
+## Installing SeedVR2
+
+Only needed for restoring - Preview Mode runs without any of this. Three separate things: a checkout, a virtualenv with torch, the model files. Put them wherever you like; `.env` is what ties them to the tool. No ComfyUI needed.
+
+### 1. The checkout
+
+```
+git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git D:\path\to\ComfyUI-SeedVR2_VideoUpscaler
+```
+
+Tested against commit `4490bd1`. The restore worker calls the repo's internal functions, not its CLI, so if a later upstream change breaks it, `git checkout 4490bd1`.
+
+### 2. The virtualenv
+
+Its own venv, not the tool's `.venv`. Python 3.12 or 3.13.
+
+```
+python -m venv E:\envs\seedvr2
+E:\envs\seedvr2\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu134
+E:\envs\seedvr2\Scripts\python.exe -m pip install -r D:\path\to\ComfyUI-SeedVR2_VideoUpscaler\requirements.txt
+```
+
+Order matters. torch goes in first, from the PyTorch CUDA index - a PyPI torch on Windows is CPU only. `cu134` is an example; pick the index that matches your GPU and driver at [pytorch.org](https://pytorch.org/get-started/locally/).
+
+The third line isn't optional. A venv with torch alone gets as far as `ModuleNotFoundError: No module named 'omegaconf'` the first time the worker starts.
+
+Check it:
+
+```
+E:\envs\seedvr2\Scripts\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+You want a `+cu` version and `True`. A version with no `+cu` suffix, or `False`, means the CPU build got in - reinstall torch from the CUDA index.
+
+Tested with torch 2.15.0+cu134 on Python 3.13, RTX 5090.
+
+On start SeedVR2 suggests installing SageAttention, Flash Attention and Triton. Optional speed-ups; the default `sdpa` attention needs none of them.
+
+### 3. The models
+
+Two files, ~8.4 GB. They live in two different repositories - the default DiT checkpoint isn't in the one that has the VAE:
+
+```
+E:\envs\seedvr2\Scripts\hf.exe download AInVFX/SeedVR2_comfyUI seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors --local-dir F:\checkpoints\seedvr2
+E:\envs\seedvr2\Scripts\hf.exe download numz/SeedVR2_comfyUI ema_vae_fp16.safetensors --local-dir F:\checkpoints\seedvr2
+```
+
+`hf.exe` arrives with the requirements in step 2. Download the files yourself: the tool checks both exist before it starts the worker, so nothing is fetched automatically.
+
+Other variants (3B, fp16, sharp) are in the same two repositories. Download the one you want and set `DIT_MODEL` in `.env` to its filename.
+
+### 4. Wire it up
+
+Put the three locations into `.env`:
+
+```
+SEEDVR2_REPO=D:\path\to\ComfyUI-SeedVR2_VideoUpscaler
+SEEDVR2_PYTHON=E:\envs\seedvr2\Scripts\python.exe
+MODEL_DIR=F:\checkpoints\seedvr2
+```
+
+Then `extract.bat doctor`.
 
 ## Running the stages separately
 
